@@ -126,4 +126,5 @@ if [[ ! "$start_now" =~ ^[Yy]$ ]]; then
 fi
 
 echo "Running: $binary_path --config $config_path"
+export BEAM_CONTROL_PLANE_URL="$control_plane_url"
 exec "$binary_path" --config "$config_path"

@@ -113,4 +113,5 @@ if ($startNow -notmatch "^[Yy]") {
 }
 
 Write-Host "Running: $binaryPath --config $configPath"
+$env:BEAM_CONTROL_PLANE_URL = $controlPlaneUrl
 & $binaryPath --config $configPath

@@ -119,6 +119,7 @@ def main() -> int:
         print(f"{binary_path} --config {config_file}")
         return 0
 
+    os.environ["BEAM_CONTROL_PLANE_URL"] = control_plane_url
     cmd = [str(binary_path), "--config", str(config_file)]
     print(f"Running: {' '.join(cmd)}")
     try:
