@@ -13,9 +13,9 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
   exit 1
 fi
 
-default_url="${BEAM_CONTROL_PLANE_URL:-https://api.example.com}"
-read -r -p "Control plane URL [$default_url]: " control_plane_url
-control_plane_url=${control_plane_url:-$default_url}
+control_plane_url="${BEAM_CONTROL_PLANE_URL:-https://beam-production-f317.up.railway.app}"
+control_plane_url="${control_plane_url%/}"
+echo "Control plane URL: $control_plane_url"
 
 release_base_default="https://github.com/theopuga/beam_agent/releases/latest/download"
 read -r -p "Release base URL [$release_base_default]: " release_base

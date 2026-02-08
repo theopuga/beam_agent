@@ -72,8 +72,10 @@ def main() -> int:
         print("Aborted.")
         return 1
 
-    default_url = os.environ.get("BEAM_CONTROL_PLANE_URL", "https://api.example.com")
-    control_plane_url = prompt("Control plane URL", default=default_url)
+    control_plane_url = os.environ.get(
+        "BEAM_CONTROL_PLANE_URL", "https://beam-production-f317.up.railway.app"
+    ).rstrip("/")
+    print(f"Control plane URL: {control_plane_url}")
 
     asset_name = detect_asset_name()
     default_base = "https://github.com/theopuga/beam_agent/releases/latest/download"

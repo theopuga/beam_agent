@@ -10,10 +10,10 @@ if ($confirm -notmatch "^[Yy]") {
   exit 1
 }
 
-$defaultUrl = $env:BEAM_CONTROL_PLANE_URL
-if ([string]::IsNullOrWhiteSpace($defaultUrl)) { $defaultUrl = "https://api.example.com" }
-$controlPlaneUrl = Read-Host "Control plane URL [$defaultUrl]"
-if ([string]::IsNullOrWhiteSpace($controlPlaneUrl)) { $controlPlaneUrl = $defaultUrl }
+$controlPlaneUrl = $env:BEAM_CONTROL_PLANE_URL
+if ([string]::IsNullOrWhiteSpace($controlPlaneUrl)) { $controlPlaneUrl = "https://beam-production-f317.up.railway.app" }
+$controlPlaneUrl = $controlPlaneUrl.TrimEnd("/")
+Write-Host "Control plane URL: $controlPlaneUrl"
 
 $releaseBaseDefault = "https://github.com/theopuga/beam_agent/releases/latest/download"
 $releaseBase = Read-Host "Release base URL [$releaseBaseDefault]"
