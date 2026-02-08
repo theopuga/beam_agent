@@ -51,8 +51,16 @@ fi
 
 chmod +x "$binary_path"
 
-read -r -p "Config path [config.yaml]: " config_path
-config_path=${config_path:-config.yaml}
+read -r -p "Config path [config.yaml] (press Enter for default): " config_path
+case "${config_path,,}" in
+  "" )
+    config_path="config.yaml"
+    ;;
+  y|yes|n|no )
+    echo "Using default config.yaml"
+    config_path="config.yaml"
+    ;;
+esac
 
 if [[ -f "$config_path" ]]; then
   read -r -p "$config_path exists. Overwrite? [y/N]: " overwrite

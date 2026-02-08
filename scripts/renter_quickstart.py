@@ -96,8 +96,11 @@ def main() -> int:
     if os.name != "nt":
         binary_path.chmod(binary_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    config_path = prompt("Config path", default="config.yaml")
+    config_path = prompt("Config path (press Enter for default)", default="config.yaml")
     config_file = Path(config_path).expanduser()
+    if config_path.strip().lower() in {"y", "yes", "n", "no"}:
+        print("Using default config.yaml")
+        config_file = Path("config.yaml")
 
     if config_file.exists():
         if confirm(f"{config_file} exists. Overwrite?", default=False):

@@ -38,8 +38,12 @@ if (Test-Path $binaryPath) {
   Write-Host "Downloaded $binaryPath"
 }
 
-$configPath = Read-Host "Config path [config.yaml]"
+$configPath = Read-Host "Config path [config.yaml] (press Enter for default)"
 if ([string]::IsNullOrWhiteSpace($configPath)) { $configPath = "config.yaml" }
+if ($configPath -match '^(?i)(y|yes|n|no)$') {
+  Write-Host "Using default config.yaml"
+  $configPath = "config.yaml"
+}
 
 if (Test-Path $configPath) {
   $overwrite = Read-Host "$configPath exists. Overwrite? [y/N]"
