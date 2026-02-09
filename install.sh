@@ -17,7 +17,7 @@ control_plane_url="${BEAM_CONTROL_PLANE_URL:-https://beam-production-f317.up.rai
 control_plane_url="${control_plane_url%/}"
 echo "Control plane URL: $control_plane_url"
 
-release_base_default="https://github.com/theopuga/beam_agent/releases/latest/download"
+release_base_default="https://linux-tar-beam.4f166a6e695817a33925cbb65c82020b.r2.dev" 
 read -r -p "Release base URL [$release_base_default]: " release_base
 release_base=${release_base:-$release_base_default}
 release_base="${release_base%/}"
