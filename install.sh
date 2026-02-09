@@ -182,7 +182,17 @@ PY
     echo "setuptools missing pkg_resources; reinstalling a compatible version"
     "$petals_venv/bin/python" -m pip install --upgrade "setuptools<70"
   fi
-  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall --ignore-installed --no-deps "typing_extensions>=4.12"
+  site_pkgs="$("$petals_venv/bin/python" - <<'PY'
+import sysconfig
+print(sysconfig.get_paths()["purelib"])
+PY
+)"
+  if ! "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall --no-deps "typing_extensions>=4.12"; then
+    echo "Cleaning stale typing_extensions files"
+    rm -f "$site_pkgs/typing_extensions.py" "$site_pkgs/typing_extensions.pyi"
+    rm -rf "$site_pkgs/typing_extensions-"*.dist-info
+    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall --no-deps "typing_extensions>=4.12"
+  fi
   "$petals_venv/bin/python" -m pip install --upgrade --no-deps grpcio protobuf grpcio-tools
   if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
     "$petals_venv/bin/python" -m pip install torch torchvision torchaudio --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
