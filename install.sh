@@ -182,6 +182,7 @@ PY
     echo "setuptools missing pkg_resources; reinstalling a compatible version"
     "$petals_venv/bin/python" -m pip install --upgrade "setuptools<70"
   fi
+  "$petals_venv/bin/python" -m pip install --upgrade grpcio-tools
   if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
     "$petals_venv/bin/python" -m pip install torch torchvision torchaudio --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
   fi
