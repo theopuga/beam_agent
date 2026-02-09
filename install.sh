@@ -206,8 +206,15 @@ PY
     "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall --no-deps "typing_extensions>=4.12"
   fi
   "$petals_venv/bin/python" -m pip install --upgrade --no-deps grpcio protobuf grpcio-tools
-  if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
-    "$petals_venv/bin/python" -m pip install torch torchvision torchaudio --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
+  torch_spec="${BEAM_PETALS_TORCH_SPEC:-torch<2.2}"
+  torchvision_spec="${BEAM_PETALS_TORCHVISION_SPEC:-torchvision<0.17}"
+  torchaudio_spec="${BEAM_PETALS_TORCHAUDIO_SPEC:-torchaudio<2.2}"
+  if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
+    if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
+      "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec" "$torchvision_spec" "$torchaudio_spec" --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
+    else
+      "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec"
+    fi
   fi
   petals_pip_args=()
   if [[ "${BEAM_PETALS_PIP_NO_BUILD_ISOLATION:-true}" == "true" ]]; then
