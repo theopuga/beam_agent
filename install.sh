@@ -174,7 +174,14 @@ PY
   petals_venv="${BEAM_PETALS_VENV_DIR:-./beam-petals-venv}"
   echo "Installing Petals runtime in $petals_venv"
   python3 -m venv "$petals_venv"
-  "$petals_venv/bin/python" -m pip install --upgrade pip setuptools wheel
+  "$petals_venv/bin/python" -m pip install --upgrade pip "setuptools<70" wheel
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import pkg_resources  # noqa: F401
+PY
+  then
+    echo "setuptools missing pkg_resources; reinstalling a compatible version"
+    "$petals_venv/bin/python" -m pip install --upgrade "setuptools<70"
+  fi
   if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
     "$petals_venv/bin/python" -m pip install torch torchvision torchaudio --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
   fi
