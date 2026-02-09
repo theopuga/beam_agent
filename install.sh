@@ -13,7 +13,7 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
   exit 1
 fi
 
-control_plane_url="${BEAM_CONTROL_PLANE_URL:-https://beam-production-f317.up.railway.app}"
+control_plane_url="${BEAM_CONTROL_PLANE_URL:-https://www.openbeam.me/}"
 control_plane_url="${control_plane_url%/}"
 echo "Control plane URL: $control_plane_url"
 
@@ -32,21 +32,41 @@ case "$os" in
     ;;
 esac
 
-binary_path="./$asset_name"
-download_url="$release_base/$asset_name"
+archive_name="${asset_name}.tar.gz"
+archive_path="./$archive_name"
+download_url="$release_base/$archive_name"
 
-if [[ -f "$binary_path" ]]; then
-  read -r -p "$binary_path exists. Redownload? [y/N]: " redownload
+if [[ -f "$archive_path" ]]; then
+  read -r -p "$archive_path exists. Redownload? [y/N]: " redownload
   redownload=${redownload:-N}
   if [[ "$redownload" =~ ^[Yy]$ ]]; then
-    curl -fL "$download_url" -o "$binary_path"
-    echo "Downloaded $binary_path"
+    curl -fL "$download_url" -o "$archive_path"
+    echo "Downloaded $archive_path"
   else
-    echo "Using existing $binary_path"
+    echo "Using existing $archive_path"
   fi
 else
-  curl -fL "$download_url" -o "$binary_path"
-  echo "Downloaded $binary_path"
+  curl -fL "$download_url" -o "$archive_path"
+  echo "Downloaded $archive_path"
+fi
+
+extract_dir="./${asset_name}_extracted"
+rm -rf "$extract_dir"
+mkdir -p "$extract_dir"
+tar -xzf "$archive_path" -C "$extract_dir"
+
+if [[ -f "$extract_dir/$asset_name" ]]; then
+  binary_path="$extract_dir/$asset_name"
+elif [[ -f "$extract_dir/$asset_name/$asset_name" ]]; then
+  binary_path="$extract_dir/$asset_name/$asset_name"
+else
+  found_binary="$(find "$extract_dir" -type f -name "$asset_name" | head -n 1)"
+  if [[ -n "$found_binary" ]]; then
+    binary_path="$found_binary"
+  else
+    echo "Failed to locate $asset_name inside extracted archive."
+    exit 1
+  fi
 fi
 
 chmod +x "$binary_path"
@@ -135,4 +155,6 @@ fi
 
 echo "Running: $binary_path --config $config_path"
 export BEAM_CONTROL_PLANE_URL="$control_plane_url"
+export CONTROL_PLANE_URL="$control_plane_url"
 exec "$binary_path" --config "$config_path"
+
