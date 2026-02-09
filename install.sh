@@ -32,21 +32,41 @@ case "$os" in
     ;;
 esac
 
-binary_path="./$asset_name"
-download_url="$release_base/$asset_name"
+archive_name="${asset_name}.tar.gz"
+archive_path="./$archive_name"
+download_url="$release_base/$archive_name"
 
-if [[ -f "$binary_path" ]]; then
-  read -r -p "$binary_path exists. Redownload? [y/N]: " redownload
+if [[ -f "$archive_path" ]]; then
+  read -r -p "$archive_path exists. Redownload? [y/N]: " redownload
   redownload=${redownload:-N}
   if [[ "$redownload" =~ ^[Yy]$ ]]; then
-    curl -fL "$download_url" -o "$binary_path"
-    echo "Downloaded $binary_path"
+    curl -fL "$download_url" -o "$archive_path"
+    echo "Downloaded $archive_path"
   else
-    echo "Using existing $binary_path"
+    echo "Using existing $archive_path"
   fi
 else
-  curl -fL "$download_url" -o "$binary_path"
-  echo "Downloaded $binary_path"
+  curl -fL "$download_url" -o "$archive_path"
+  echo "Downloaded $archive_path"
+fi
+
+extract_dir="./${asset_name}_extracted"
+rm -rf "$extract_dir"
+mkdir -p "$extract_dir"
+tar -xzf "$archive_path" -C "$extract_dir"
+
+if [[ -f "$extract_dir/$asset_name" ]]; then
+  binary_path="$extract_dir/$asset_name"
+elif [[ -f "$extract_dir/$asset_name/$asset_name" ]]; then
+  binary_path="$extract_dir/$asset_name/$asset_name"
+else
+  found_binary="$(find "$extract_dir" -type f -name "$asset_name" | head -n 1)"
+  if [[ -n "$found_binary" ]]; then
+    binary_path="$found_binary"
+  else
+    echo "Failed to locate $asset_name inside extracted archive."
+    exit 1
+  fi
 fi
 
 chmod +x "$binary_path"
@@ -88,8 +108,6 @@ agent:
   capabilities:
     supports_heavy_middle_layers: true
     max_concurrent_jobs: 1
-    # max_blocks: 12
-    # max_model_class: "B"
 EOF
     echo "Wrote $config_path"
   else
@@ -118,8 +136,6 @@ agent:
   capabilities:
     supports_heavy_middle_layers: true
     max_concurrent_jobs: 1
-    # max_blocks: 12
-    # max_model_class: "B"
 EOF
   echo "Wrote $config_path"
 fi
@@ -127,8 +143,6 @@ fi
 echo
 echo "Next: the agent will start and print a 6-digit pair code."
 echo "Open the Rent Panel and enter the code to link this machine."
-echo
-
 ensure_petals_runtime() {
   if [[ -n "${BEAM_PETALS_PYTHON:-}" ]]; then
     echo "Using BEAM_PETALS_PYTHON=$BEAM_PETALS_PYTHON"
@@ -158,30 +172,17 @@ PY
   fi
 
   petals_venv="${BEAM_PETALS_VENV_DIR:-./beam-petals-venv}"
-  if [[ "$petals_venv" != /* ]]; then
-    petals_venv="$(pwd -P)/$petals_venv"
-  fi
   echo "Installing Petals runtime in $petals_venv"
   python3 -m venv "$petals_venv"
-  "$petals_venv/bin/python" -m pip install --upgrade pip
-  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
-import pkg_resources  # noqa: F401
-PY
-  then
-    "$petals_venv/bin/python" -m pip install setuptools
-  fi
-  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
-import wheel  # noqa: F401
-PY
-  then
-    "$petals_venv/bin/python" -m pip install wheel
-  fi
+  "$petals_venv/bin/python" -m pip install --upgrade pip setuptools wheel
   if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
     "$petals_venv/bin/python" -m pip install torch torchvision torchaudio --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
   fi
-  PIP_NO_BUILD_ISOLATION=1 "$petals_venv/bin/python" -m pip install --no-build-isolation petals
+  "$petals_venv/bin/python" -m pip install petals
   export BEAM_PETALS_PYTHON="$petals_venv/bin/python"
 }
+
+echo
 
 read -r -p "Start the agent now? [Y/n]: " start_now
 start_now=${start_now:-Y}
@@ -195,4 +196,5 @@ ensure_petals_runtime
 
 echo "Running: $binary_path --config $config_path"
 export BEAM_CONTROL_PLANE_URL="$control_plane_url"
+export CONTROL_PLANE_URL="$control_plane_url"
 exec "$binary_path" --config "$config_path"
