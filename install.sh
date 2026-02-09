@@ -143,6 +143,45 @@ fi
 echo
 echo "Next: the agent will start and print a 6-digit pair code."
 echo "Open the Rent Panel and enter the code to link this machine."
+ensure_petals_runtime() {
+  if [[ -n "${BEAM_PETALS_PYTHON:-}" ]]; then
+    echo "Using BEAM_PETALS_PYTHON=$BEAM_PETALS_PYTHON"
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 - <<'PY' >/dev/null 2>&1
+import petals  # noqa: F401
+PY
+    then
+      BEAM_PETALS_PYTHON="$(command -v python3)"
+      export BEAM_PETALS_PYTHON
+      echo "Using system python for Petals: $BEAM_PETALS_PYTHON"
+      return 0
+    fi
+  fi
+
+  if [[ "${BEAM_SKIP_PETALS_SETUP:-}" == "true" ]]; then
+    echo "Petals not found. Set BEAM_PETALS_PYTHON or install petals."
+    return 1
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 not found. Please install Python 3 to set up Petals."
+    return 1
+  fi
+
+  petals_venv="${BEAM_PETALS_VENV_DIR:-./beam-petals-venv}"
+  echo "Installing Petals runtime in $petals_venv"
+  python3 -m venv "$petals_venv"
+  "$petals_venv/bin/python" -m pip install --upgrade pip
+  if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
+    "$petals_venv/bin/python" -m pip install torch torchvision torchaudio --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
+  fi
+  "$petals_venv/bin/python" -m pip install petals
+  export BEAM_PETALS_PYTHON="$petals_venv/bin/python"
+}
+
 echo
 
 read -r -p "Start the agent now? [Y/n]: " start_now
@@ -152,6 +191,8 @@ if [[ ! "$start_now" =~ ^[Yy]$ ]]; then
   echo "$binary_path --config $config_path"
   exit 0
 fi
+
+ensure_petals_runtime
 
 echo "Running: $binary_path --config $config_path"
 export BEAM_CONTROL_PLANE_URL="$control_plane_url"
