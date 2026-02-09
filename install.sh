@@ -178,7 +178,11 @@ PY
   if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
     "$petals_venv/bin/python" -m pip install torch torchvision torchaudio --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
   fi
-  "$petals_venv/bin/python" -m pip install petals
+  petals_pip_args=()
+  if [[ "${BEAM_PETALS_PIP_NO_BUILD_ISOLATION:-true}" == "true" ]]; then
+    petals_pip_args+=(--no-build-isolation)
+  fi
+  "$petals_venv/bin/python" -m pip install "${petals_pip_args[@]}" petals
   export BEAM_PETALS_PYTHON="$petals_venv/bin/python"
 }
 
