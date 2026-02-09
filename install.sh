@@ -172,6 +172,18 @@ PY
   fi
 
   petals_venv="${BEAM_PETALS_VENV_DIR:-./beam-petals-venv}"
+  # Normalize to a clean absolute path (avoid leading '//' which can break pip installs).
+  petals_venv="$(
+    BEAM_PETALS_VENV_DIR_RESOLVE="$petals_venv" python3 - <<'PY'
+import os
+path = os.environ["BEAM_PETALS_VENV_DIR_RESOLVE"]
+path = os.path.expanduser(path)
+path = os.path.abspath(path)
+if path.startswith("//"):
+    path = "/" + path.lstrip("/")
+print(path)
+PY
+  )"
   echo "Installing Petals runtime in $petals_venv"
   python3 -m venv "$petals_venv"
   "$petals_venv/bin/python" -m pip install --upgrade pip "setuptools<70" wheel
