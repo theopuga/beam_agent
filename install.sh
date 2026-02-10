@@ -216,9 +216,10 @@ PY
       "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec"
     fi
   fi
-  hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub>=0.24,<1.0}"
-  transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.43.1}"
-  "$petals_venv/bin/python" -m pip install --upgrade "$hf_hub_spec" "$transformers_spec"
+  hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub>=0.17.0}"
+  transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.34.1}"
+  numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy==1.24.3}"
+  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$hf_hub_spec" "$transformers_spec" "$numpy_spec"
   petals_pip_args=()
   if [[ "${BEAM_PETALS_PIP_NO_BUILD_ISOLATION:-true}" == "true" ]]; then
     petals_pip_args+=(--no-build-isolation)
