@@ -17,7 +17,7 @@ control_plane_url="${BEAM_CONTROL_PLANE_URL:-https://www.openbeam.me/}"
 control_plane_url="${control_plane_url%/}"
 echo "Control plane URL: $control_plane_url"
 
-release_base_default="https://download.openbeam.me"
+release_base_default="https://github.com/theopuga/beam_agent/releases/latest/download"
 read -r -p "Release base URL [$release_base_default]: " release_base
 release_base=${release_base:-$release_base_default}
 release_base="${release_base%/}"

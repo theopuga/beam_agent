@@ -11,7 +11,7 @@ if ($confirm -notmatch "^[Yy]") {
 }
 
 $controlPlaneUrl = $env:BEAM_CONTROL_PLANE_URL
-if ([string]::IsNullOrWhiteSpace($controlPlaneUrl)) { $controlPlaneUrl = "https://beam-production-f317.up.railway.app" }
+if ([string]::IsNullOrWhiteSpace($controlPlaneUrl)) { $controlPlaneUrl = "https://www.openbeam.me" }
 $controlPlaneUrl = $controlPlaneUrl.TrimEnd("/")
 Write-Host "Control plane URL: $controlPlaneUrl"
 
