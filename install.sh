@@ -6,7 +6,7 @@ echo "This will download the agent, write a config, and start pairing."
 echo "Keep this terminal open to see the pairing code."
 echo
 
-read -r -p "Continue? [Y/n]: " confirm
+read -r -p "Continue? [Y/n]: " confirm < /dev/tty
 confirm=${confirm:-Y}
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
   echo "Aborted."
@@ -18,7 +18,7 @@ control_plane_url="${control_plane_url%/}"
 echo "Control plane URL: $control_plane_url"
 
 release_base_default="https://github.com/theopuga/beam_agent/releases/latest/download"
-read -r -p "Release base URL [$release_base_default]: " release_base
+read -r -p "Release base URL [$release_base_default]: " release_base < /dev/tty
 release_base=${release_base:-$release_base_default}
 release_base="${release_base%/}"
 
@@ -37,7 +37,7 @@ archive_path="./$archive_name"
 download_url="$release_base/$archive_name"
 
 if [[ -f "$archive_path" ]]; then
-  read -r -p "$archive_path exists. Redownload? [y/N]: " redownload
+  read -r -p "$archive_path exists. Redownload? [y/N]: " redownload < /dev/tty
   redownload=${redownload:-N}
   if [[ "$redownload" =~ ^[Yy]$ ]]; then
     curl -fL "$download_url" -o "$archive_path"
@@ -71,7 +71,7 @@ fi
 
 chmod +x "$binary_path"
 
-read -r -p "Config path [config.yaml] (press Enter for default): " config_path
+read -r -p "Config path [config.yaml] (press Enter for default): " config_path < /dev/tty
 case "${config_path,,}" in
   "" )
     config_path="config.yaml"
@@ -83,7 +83,7 @@ case "${config_path,,}" in
 esac
 
 if [[ -f "$config_path" ]]; then
-  read -r -p "$config_path exists. Overwrite? [y/N]: " overwrite
+  read -r -p "$config_path exists. Overwrite? [y/N]: " overwrite < /dev/tty
   overwrite=${overwrite:-N}
   if [[ "$overwrite" =~ ^[Yy]$ ]]; then
     cat > "$config_path" <<EOF
@@ -236,7 +236,7 @@ PY
 
 echo
 
-read -r -p "Start the agent now? [Y/n]: " start_now
+read -r -p "Start the agent now? [Y/n]: " start_now < /dev/tty
 start_now=${start_now:-Y}
 if [[ ! "$start_now" =~ ^[Yy]$ ]]; then
   echo "You can start it later with:"
