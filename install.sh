@@ -224,6 +224,13 @@ PY
     petals_pip_args+=(--no-build-isolation)
   fi
   "$petals_venv/bin/python" -m pip install "${petals_pip_args[@]}" petals
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+from huggingface_hub import split_torch_state_dict_into_shards  # noqa: F401
+PY
+  then
+    echo "huggingface-hub too old for Petals; upgrading to a compatible version"
+    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$hf_hub_spec" "$transformers_spec"
+  fi
   export BEAM_PETALS_PYTHON="$petals_venv/bin/python"
 }
 
