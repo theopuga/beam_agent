@@ -1,0 +1,63 @@
+name: Build Agent Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: beam-node-agent-linux
+          - os: macos-latest
+            artifact: beam-node-agent-macos
+          - os: windows-latest
+            artifact: beam-node-agent-windows.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install aiohttp pyyaml pydantic
+
+      - name: Build binary
+        run: |
+          pyinstaller --onefile --name ${{ matrix.artifact }} beam_node_agent/main.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            beam-node-agent-linux/beam-node-agent-linux
+            beam-node-agent-macos/beam-node-agent-macos
+            beam-node-agent-windows.exe/beam-node-agent-windows.exe
+          generate_release_notes: true

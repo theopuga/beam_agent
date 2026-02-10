@@ -1,0 +1,17 @@
+[project]
+name = "beam-node-agent"
+version = "0.1.0"
+description = "Beam Network Node Agent"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+beam-node-agent = "beam_node_agent.main:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

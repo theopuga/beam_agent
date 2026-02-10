@@ -1,0 +1,28 @@
+
+control_plane:
+  url: "http://localhost:8080"
+
+petals:
+  port: 31337
+  # public_ip: "1.2.3.4" # Optional, auto-detect otherwise
+  gpu_vram_limit: 0.9
+
+agent:
+  heartbeat_interval_sec: 15
+  state_file: "node_state.json"
+  transports: 
+    - "fast"
+  # mock_inference: true
+  # pairing_token: "paste-pairing-token-here"
+  pairing_host: "127.0.0.1"
+  pairing_ports:
+    - 51337
+    - 51338
+    - 51339
+    - 51340
+  # onion_address: "abc123.onion"
+  capabilities:
+    supports_heavy_middle_layers: true
+    max_concurrent_jobs: 1
+    # max_blocks: 12
+    # max_model_class: "B"
