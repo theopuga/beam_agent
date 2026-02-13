@@ -206,19 +206,19 @@ PY
     "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall --no-deps "typing_extensions>=4.12"
   fi
   "$petals_venv/bin/python" -m pip install --upgrade --no-deps grpcio protobuf grpcio-tools
-  torch_spec="${BEAM_PETALS_TORCH_SPEC:-torch>=2.2.0}"
-  torchvision_spec="${BEAM_PETALS_TORCHVISION_SPEC:-torchvision>=0.17.0}"
-  torchaudio_spec="${BEAM_PETALS_TORCHAUDIO_SPEC:-torchaudio>=2.2.0}"
+  torch_spec="${BEAM_PETALS_TORCH_SPEC:-torch>=2.1,<2.4}"
+  torchvision_spec="${BEAM_PETALS_TORCHVISION_SPEC:-torchvision>=0.16,<0.19}"
+  torchaudio_spec="${BEAM_PETALS_TORCHAUDIO_SPEC:-torchaudio>=2.1,<2.4}"
   if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
     if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
       "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec" "$torchvision_spec" "$torchaudio_spec" --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
     else
-      "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec"
+      "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec" "$torchvision_spec" "$torchaudio_spec"
     fi
   fi
   hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub>=0.17.0}"
   transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.34.1}"
-  numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy==1.24.3}"
+  numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
   
   petals_pip_args=()
   if [[ "${BEAM_PETALS_PIP_NO_BUILD_ISOLATION:-true}" == "true" ]]; then
@@ -237,6 +237,34 @@ PY
   then
     echo "huggingface-hub too old for Petals; upgrading to a compatible version"
     "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$hf_hub_spec" "$transformers_spec"
+  fi
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import hivemind  # noqa: F401
+from torch.cuda.amp.grad_scaler import _refresh_per_optimizer_state  # noqa: F401
+PY
+  then
+    echo "Detected incompatible torch/hivemind combination. Reinstalling a compatible torch stack."
+    torch_compat_spec="${BEAM_PETALS_TORCH_COMPAT_SPEC:-torch>=2.1,<2.4}"
+    torchvision_compat_spec="${BEAM_PETALS_TORCHVISION_COMPAT_SPEC:-torchvision>=0.16,<0.19}"
+    torchaudio_compat_spec="${BEAM_PETALS_TORCHAUDIO_COMPAT_SPEC:-torchaudio>=2.1,<2.4}"
+    if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
+      "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
+        "$torch_compat_spec" "$torchvision_compat_spec" "$torchaudio_compat_spec" \
+        --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
+    else
+      "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
+        "$torch_compat_spec" "$torchvision_compat_spec" "$torchaudio_compat_spec"
+    fi
+    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2"
+  fi
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import hivemind  # noqa: F401
+from torch.cuda.amp.grad_scaler import _refresh_per_optimizer_state  # noqa: F401
+PY
+  then
+    echo "ERROR: Petals runtime is still incompatible (torch/hivemind)."
+    echo "Try setting BEAM_PETALS_TORCH_COMPAT_SPEC and rerun install.sh."
+    return 1
   fi
   export BEAM_PETALS_PYTHON="$petals_venv/bin/python"
 }
@@ -257,3 +285,4 @@ echo "Running: $binary_path --config $config_path"
 export BEAM_CONTROL_PLANE_URL="$control_plane_url"
 export CONTROL_PLANE_URL="$control_plane_url"
 exec "$binary_path" --config "$config_path"
+
