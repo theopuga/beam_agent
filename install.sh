@@ -268,9 +268,12 @@ PY
   patch_falcon_mqa="${BEAM_PETALS_PATCH_FALCON_MQA:-true}"
   if [[ "$patch_falcon_mqa" == "true" ]]; then
     falcon_block_path="$("$petals_venv/bin/python" - <<'PY'
-import importlib.util
-spec = importlib.util.find_spec("petals.models.falcon.block")
-print(spec.origin if spec and spec.origin else "")
+import pathlib
+import sysconfig
+
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+candidate = site_pkgs / "petals" / "models" / "falcon" / "block.py"
+print(candidate if candidate.exists() else "")
 PY
 )"
     if [[ -n "$falcon_block_path" && -f "$falcon_block_path" ]]; then
