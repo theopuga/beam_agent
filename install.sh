@@ -216,7 +216,7 @@ PY
       "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec" "$torchvision_spec" "$torchaudio_spec"
     fi
   fi
-  hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub>=0.17.0}"
+  hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub>=0.24.0,<1.0}"
   transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.34.1}"
   numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
   
@@ -257,8 +257,28 @@ PY
 from huggingface_hub import split_torch_state_dict_into_shards  # noqa: F401
 PY
   then
-    echo "huggingface-hub too old for Petals; upgrading to a compatible version"
-    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$hf_hub_spec" "$transformers_spec"
+    echo "huggingface-hub too old for accelerate; upgrading to a compatible version"
+    if ! "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$hf_hub_spec" "$transformers_spec"; then
+      echo "huggingface-hub upgrade failed; falling back to removing accelerate"
+    fi
+  fi
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import importlib.util
+if importlib.util.find_spec("accelerate") is not None:
+    from huggingface_hub import split_torch_state_dict_into_shards  # noqa: F401
+PY
+  then
+    echo "accelerate is incompatible with installed huggingface-hub; uninstalling accelerate"
+    "$petals_venv/bin/python" -m pip uninstall -y accelerate
+  fi
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import numpy
+if int(numpy.__version__.split(".")[0]) >= 2:
+    raise RuntimeError(f"incompatible numpy version: {numpy.__version__}")
+PY
+  then
+    echo "NumPy 2.x detected; forcing NumPy < 2 for torch/hivemind compatibility"
+    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2"
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import hivemind  # noqa: F401
@@ -289,6 +309,18 @@ PY
   then
     echo "ERROR: Petals runtime is still incompatible (torch/hivemind)."
     echo "Try setting BEAM_PETALS_TORCH_COMPAT_SPEC and rerun install.sh."
+    return 1
+  fi
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import importlib.util
+import numpy
+if int(numpy.__version__.split(".")[0]) >= 2:
+    raise RuntimeError(f"incompatible numpy version: {numpy.__version__}")
+if importlib.util.find_spec("accelerate") is not None:
+    from huggingface_hub import split_torch_state_dict_into_shards  # noqa: F401
+PY
+  then
+    echo "ERROR: Petals runtime is still incompatible (numpy/huggingface-hub/accelerate)."
     return 1
   fi
   export BEAM_PETALS_PYTHON="$petals_venv/bin/python"
