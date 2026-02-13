@@ -66,7 +66,6 @@ class PetalsWrapper:
             python_exec,
             "-m",
             "petals.cli.run_server",
-            "--model",
             model_id,
             "--port",
             str(self.port),

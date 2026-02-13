@@ -340,7 +340,26 @@ PY
     echo "ERROR: Petals runtime is still incompatible (numpy)."
     return 1
   fi
-  export BEAM_PETALS_PYTHON="$petals_venv/bin/python"
+  petals_python_real="$petals_venv/bin/python"
+  petals_model_shim="${BEAM_PETALS_ENABLE_MODEL_ARG_SHIM:-true}"
+  if [[ "$petals_model_shim" == "true" ]]; then
+    petals_python_shim="$petals_venv/bin/beam-petals-python"
+    cat > "$petals_python_shim" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+real_python="$petals_python_real"
+if [[ "\$#" -ge 4 && "\$1" == "-m" && "\$2" == "petals.cli.run_server" && "\$3" == "--model" ]]; then
+  model_id="\$4"
+  shift 4
+  exec "\$real_python" -m petals.cli.run_server "\$model_id" "\$@"
+fi
+exec "\$real_python" "\$@"
+EOF
+    chmod +x "$petals_python_shim"
+    export BEAM_PETALS_PYTHON="$petals_python_shim"
+  else
+    export BEAM_PETALS_PYTHON="$petals_python_real"
+  fi
 }
 
 echo
