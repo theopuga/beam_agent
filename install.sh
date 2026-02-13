@@ -185,6 +185,11 @@ print(path)
 PY
   )"
   echo "Installing Petals runtime in $petals_venv"
+  recreate_venv="${BEAM_PETALS_RECREATE_VENV:-true}"
+  if [[ -d "$petals_venv" && "$recreate_venv" == "true" ]]; then
+    echo "Recreating existing Petals runtime at $petals_venv"
+    rm -rf "$petals_venv"
+  fi
   python3 -m venv "$petals_venv"
   "$petals_venv/bin/python" -m pip install --upgrade pip "setuptools<70" wheel
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
@@ -216,7 +221,7 @@ PY
       "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec" "$torchvision_spec" "$torchaudio_spec"
     fi
   fi
-  hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub>=0.24.0,<1.0}"
+  hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub==0.17.3}"
   transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.34.1}"
   numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
   
@@ -253,23 +258,21 @@ PY
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
     "${hivemind_pip_args[@]}" \
     "$hivemind_spec"
-  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+  keep_accelerate="${BEAM_PETALS_KEEP_ACCELERATE:-false}"
+  if [[ "$keep_accelerate" != "true" ]]; then
+    echo "Removing accelerate to keep Petals compatible with pinned transformers/tokenizers"
+    "$petals_venv/bin/python" -m pip uninstall -y accelerate >/dev/null 2>&1 || true
+  fi
+  if [[ "$keep_accelerate" == "true" ]]; then
+    if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import accelerate  # noqa: F401
 from huggingface_hub import split_torch_state_dict_into_shards  # noqa: F401
 PY
-  then
-    echo "huggingface-hub too old for accelerate; upgrading to a compatible version"
-    if ! "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$hf_hub_spec" "$transformers_spec"; then
-      echo "huggingface-hub upgrade failed; falling back to removing accelerate"
+    then
+      echo "ERROR: accelerate requires a newer huggingface-hub than this Petals stack allows."
+      echo "Set BEAM_PETALS_KEEP_ACCELERATE=false or provide a fully compatible dependency set."
+      return 1
     fi
-  fi
-  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
-import importlib.util
-if importlib.util.find_spec("accelerate") is not None:
-    from huggingface_hub import split_torch_state_dict_into_shards  # noqa: F401
-PY
-  then
-    echo "accelerate is incompatible with installed huggingface-hub; uninstalling accelerate"
-    "$petals_venv/bin/python" -m pip uninstall -y accelerate
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import numpy
@@ -312,15 +315,12 @@ PY
     return 1
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
-import importlib.util
 import numpy
 if int(numpy.__version__.split(".")[0]) >= 2:
     raise RuntimeError(f"incompatible numpy version: {numpy.__version__}")
-if importlib.util.find_spec("accelerate") is not None:
-    from huggingface_hub import split_torch_state_dict_into_shards  # noqa: F401
 PY
   then
-    echo "ERROR: Petals runtime is still incompatible (numpy/huggingface-hub/accelerate)."
+    echo "ERROR: Petals runtime is still incompatible (numpy)."
     return 1
   fi
   export BEAM_PETALS_PYTHON="$petals_venv/bin/python"
