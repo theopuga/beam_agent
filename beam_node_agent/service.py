@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import sys
 import threading
 import time
 from typing import Any, AsyncIterator, Dict, Optional
@@ -609,9 +611,50 @@ class NodeAgent:
             self._inference_tokenizer = tokenizer
             return model, tokenizer
 
+    def _extend_sys_path_for_petals(self) -> None:
+        candidates: list[str] = []
+
+        site_pkgs_env = os.environ.get("BEAM_PETALS_SITE_PACKAGES")
+        if site_pkgs_env:
+            candidates.extend(p for p in site_pkgs_env.split(os.pathsep) if p)
+
+        petals_python = os.environ.get("BEAM_PETALS_PYTHON")
+        if petals_python:
+            try:
+                purelib = subprocess.check_output(
+                    [
+                        petals_python,
+                        "-c",
+                        "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+                    ],
+                    text=True,
+                    timeout=10,
+                ).strip()
+                if purelib:
+                    candidates.append(purelib)
+            except Exception:
+                pass
+
+        for path in candidates:
+            if os.path.isdir(path) and path not in sys.path:
+                sys.path.insert(0, path)
+
     def _load_model_sync(self, model_id: str):
-        from petals import AutoDistributedModelForCausalLM
-        from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
+        self._extend_sys_path_for_petals()
+        try:
+            from petals import AutoDistributedModelForCausalLM
+            from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
+        except ModuleNotFoundError as exc:
+            self._extend_sys_path_for_petals()
+            try:
+                from petals import AutoDistributedModelForCausalLM
+                from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
+            except ModuleNotFoundError as retry_exc:
+                raise RuntimeError(
+                    "petals is not importable in node-agent runtime; "
+                    "ensure BEAM_PETALS_PYTHON/BEAM_PETALS_SITE_PACKAGES are set "
+                    "or rebuild the node-agent binary with petals bundled."
+                ) from retry_exc
         from transformers import AutoTokenizer
         import torch
 

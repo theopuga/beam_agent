@@ -421,6 +421,23 @@ fi
 
 ensure_petals_runtime
 
+if [[ -n "${BEAM_PETALS_PYTHON:-}" ]]; then
+  petals_site_pkgs="$("$BEAM_PETALS_PYTHON" - <<'PY'
+import sysconfig
+print(sysconfig.get_paths()["purelib"])
+PY
+)"
+  if [[ -d "$petals_site_pkgs" ]]; then
+    export BEAM_PETALS_SITE_PACKAGES="$petals_site_pkgs"
+    if [[ -n "${PYTHONPATH:-}" ]]; then
+      export PYTHONPATH="$petals_site_pkgs:$PYTHONPATH"
+    else
+      export PYTHONPATH="$petals_site_pkgs"
+    fi
+    echo "Exported PYTHONPATH with Petals runtime: $petals_site_pkgs"
+  fi
+fi
+
 echo "Running: $binary_path --config $config_path"
 export BEAM_CONTROL_PLANE_URL="$control_plane_url"
 export CONTROL_PLANE_URL="$control_plane_url"
