@@ -224,7 +224,13 @@ PY
   hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub==0.17.3}"
   transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.34.1}"
   numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
-  accelerate_spec="${BEAM_PETALS_ACCELERATE_SPEC:-accelerate==0.31.0}"
+  accelerate_specs="${BEAM_PETALS_ACCELERATE_SPECS:-}"
+  if [[ -z "$accelerate_specs" && -n "${BEAM_PETALS_ACCELERATE_SPEC:-}" ]]; then
+    accelerate_specs="${BEAM_PETALS_ACCELERATE_SPEC}"
+  fi
+  if [[ -z "$accelerate_specs" ]]; then
+    accelerate_specs="0.31.0 0.30.1 0.29.3 0.28.0 0.27.2 0.26.1 0.25.0 0.24.1 0.23.0 0.22.0"
+  fi
   
   petals_pip_args=()
   if [[ "${BEAM_PETALS_PIP_NO_BUILD_ISOLATION:-true}" == "true" ]]; then
@@ -259,15 +265,30 @@ PY
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
     "${hivemind_pip_args[@]}" \
     "$hivemind_spec"
-  echo "Pinning accelerate runtime to $accelerate_spec"
-  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$accelerate_spec"
-  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+  accelerate_ok="false"
+  for accelerate_ver in $accelerate_specs; do
+    accelerate_pkg="$accelerate_ver"
+    if [[ "$accelerate_pkg" != accelerate==* ]]; then
+      accelerate_pkg="accelerate==$accelerate_pkg"
+    fi
+    echo "Trying accelerate runtime: $accelerate_pkg"
+    if ! "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall --no-deps "$accelerate_pkg"; then
+      continue
+    fi
+    if "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import accelerate  # noqa: F401
 from accelerate import init_empty_weights  # noqa: F401
 PY
-  then
-    echo "ERROR: accelerate runtime is incompatible."
-    echo "Try setting BEAM_PETALS_ACCELERATE_SPEC (recommended: accelerate==0.31.0)."
+    then
+      accelerate_ok="true"
+      echo "Using accelerate runtime: $accelerate_pkg"
+      break
+    fi
+  done
+  if [[ "$accelerate_ok" != "true" ]]; then
+    echo "ERROR: accelerate runtime is incompatible with the pinned Petals stack."
+    echo "Tried versions: $accelerate_specs"
+    echo "Set BEAM_PETALS_ACCELERATE_SPECS to override the fallback list."
     return 1
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
