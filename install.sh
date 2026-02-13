@@ -265,6 +265,50 @@ PY
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
     "${hivemind_pip_args[@]}" \
     "$hivemind_spec"
+  patch_falcon_mqa="${BEAM_PETALS_PATCH_FALCON_MQA:-true}"
+  if [[ "$patch_falcon_mqa" == "true" ]]; then
+    falcon_block_path="$("$petals_venv/bin/python" - <<'PY'
+import importlib.util
+spec = importlib.util.find_spec("petals.models.falcon.block")
+print(spec.origin if spec and spec.origin else "")
+PY
+)"
+    if [[ -n "$falcon_block_path" && -f "$falcon_block_path" ]]; then
+      patch_result="$("$petals_venv/bin/python" - "$falcon_block_path" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+fixed = "num_kv_heads = self.num_heads if self.new_decoder_architecture else self.num_kv_heads"
+legacy = "num_kv_heads = self.num_heads"
+if fixed in text:
+    print("already-patched")
+    raise SystemExit(0)
+if legacy not in text:
+    print("pattern-not-found")
+    raise SystemExit(0)
+text = text.replace(legacy, fixed, 1)
+path.write_text(text)
+print("patched")
+PY
+)"
+      case "$patch_result" in
+        patched)
+          echo "Patched Petals Falcon multi-query attention bug in $falcon_block_path"
+          ;;
+        already-patched)
+          echo "Petals Falcon multi-query patch already present"
+          ;;
+        pattern-not-found)
+          echo "Petals Falcon file pattern not found; skipping patch (likely already fixed upstream)"
+          ;;
+        *)
+          echo "Petals Falcon patch returned unexpected status: $patch_result"
+          ;;
+      esac
+    fi
+  fi
   accelerate_ok="false"
   for accelerate_ver in $accelerate_specs; do
     accelerate_pkg="$accelerate_ver"
