@@ -206,9 +206,9 @@ PY
     "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall --no-deps "typing_extensions>=4.12"
   fi
   "$petals_venv/bin/python" -m pip install --upgrade --no-deps grpcio protobuf grpcio-tools
-  torch_spec="${BEAM_PETALS_TORCH_SPEC:-torch>=2.1,<2.3}"
-  torchvision_spec="${BEAM_PETALS_TORCHVISION_SPEC:-torchvision>=0.16,<0.18}"
-  torchaudio_spec="${BEAM_PETALS_TORCHAUDIO_SPEC:-torchaudio>=2.1,<2.3}"
+  torch_spec="${BEAM_PETALS_TORCH_SPEC:-torch==2.2.2}"
+  torchvision_spec="${BEAM_PETALS_TORCHVISION_SPEC:-torchvision==0.17.2}"
+  torchaudio_spec="${BEAM_PETALS_TORCHAUDIO_SPEC:-torchaudio==2.2.2}"
   if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
     if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
       "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec" "$torchvision_spec" "$torchaudio_spec" --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
@@ -231,8 +231,28 @@ PY
     "$numpy_spec" \
     "${petals_pip_args[@]}" \
     petals
-  hivemind_spec="${BEAM_PETALS_HIVEMIND_SPEC:-hivemind @ git+https://github.com/learning-at-home/hivemind.git@213bff98a62accb91f254e2afdccbf1d69ebdea9}"
-  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$hivemind_spec"
+  if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
+    if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
+      "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
+        "$torch_spec" "$torchvision_spec" "$torchaudio_spec" \
+        --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
+    else
+      "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
+        "$torch_spec" "$torchvision_spec" "$torchaudio_spec"
+    fi
+  fi
+  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2" "setuptools<70"
+  hivemind_spec="${BEAM_PETALS_HIVEMIND_SPEC:-hivemind==1.1.10.post2}"
+  hivemind_pip_args=()
+  if [[ "${BEAM_PETALS_HIVEMIND_PIP_NO_BUILD_ISOLATION:-true}" == "true" ]]; then
+    hivemind_pip_args+=(--no-build-isolation)
+  fi
+  if [[ "${BEAM_PETALS_HIVEMIND_NO_DEPS:-true}" == "true" ]]; then
+    hivemind_pip_args+=(--no-deps)
+  fi
+  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
+    "${hivemind_pip_args[@]}" \
+    "$hivemind_spec"
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 from huggingface_hub import split_torch_state_dict_into_shards  # noqa: F401
 PY
@@ -246,9 +266,9 @@ from hivemind.optim.grad_scaler import GradScaler  # noqa: F401
 PY
   then
     echo "Detected incompatible torch/hivemind combination. Reinstalling a compatible torch stack."
-    torch_compat_spec="${BEAM_PETALS_TORCH_COMPAT_SPEC:-torch>=2.1,<2.3}"
-    torchvision_compat_spec="${BEAM_PETALS_TORCHVISION_COMPAT_SPEC:-torchvision>=0.16,<0.18}"
-    torchaudio_compat_spec="${BEAM_PETALS_TORCHAUDIO_COMPAT_SPEC:-torchaudio>=2.1,<2.3}"
+    torch_compat_spec="${BEAM_PETALS_TORCH_COMPAT_SPEC:-torch==2.2.2}"
+    torchvision_compat_spec="${BEAM_PETALS_TORCHVISION_COMPAT_SPEC:-torchvision==0.17.2}"
+    torchaudio_compat_spec="${BEAM_PETALS_TORCHAUDIO_COMPAT_SPEC:-torchaudio==2.2.2}"
     if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
       "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
         "$torch_compat_spec" "$torchvision_compat_spec" "$torchaudio_compat_spec" \
@@ -257,8 +277,10 @@ PY
       "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
         "$torch_compat_spec" "$torchvision_compat_spec" "$torchaudio_compat_spec"
     fi
-    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$hivemind_spec"
-    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2"
+    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2" "setuptools<70"
+    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
+      "${hivemind_pip_args[@]}" \
+      "$hivemind_spec"
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import hivemind  # noqa: F401
