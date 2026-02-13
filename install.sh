@@ -224,6 +224,7 @@ PY
   hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub==0.17.3}"
   transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.34.1}"
   numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
+  accelerate_spec="${BEAM_PETALS_ACCELERATE_SPEC:-accelerate==0.31.0}"
   
   petals_pip_args=()
   if [[ "${BEAM_PETALS_PIP_NO_BUILD_ISOLATION:-true}" == "true" ]]; then
@@ -258,21 +259,16 @@ PY
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
     "${hivemind_pip_args[@]}" \
     "$hivemind_spec"
-  keep_accelerate="${BEAM_PETALS_KEEP_ACCELERATE:-false}"
-  if [[ "$keep_accelerate" != "true" ]]; then
-    echo "Removing accelerate to keep Petals compatible with pinned transformers/tokenizers"
-    "$petals_venv/bin/python" -m pip uninstall -y accelerate >/dev/null 2>&1 || true
-  fi
-  if [[ "$keep_accelerate" == "true" ]]; then
-    if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+  echo "Pinning accelerate runtime to $accelerate_spec"
+  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$accelerate_spec"
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import accelerate  # noqa: F401
-from huggingface_hub import split_torch_state_dict_into_shards  # noqa: F401
+from accelerate import init_empty_weights  # noqa: F401
 PY
-    then
-      echo "ERROR: accelerate requires a newer huggingface-hub than this Petals stack allows."
-      echo "Set BEAM_PETALS_KEEP_ACCELERATE=false or provide a fully compatible dependency set."
-      return 1
-    fi
+  then
+    echo "ERROR: accelerate runtime is incompatible."
+    echo "Try setting BEAM_PETALS_ACCELERATE_SPEC (recommended: accelerate==0.31.0)."
+    return 1
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import numpy
