@@ -429,12 +429,16 @@ PY
 )"
   if [[ -d "$petals_site_pkgs" ]]; then
     export BEAM_PETALS_SITE_PACKAGES="$petals_site_pkgs"
-    if [[ -n "${PYTHONPATH:-}" ]]; then
-      export PYTHONPATH="$petals_site_pkgs:$PYTHONPATH"
+    if [[ "${BEAM_EXPORT_PYTHONPATH:-false}" == "true" ]]; then
+      if [[ -n "${PYTHONPATH:-}" ]]; then
+        export PYTHONPATH="$petals_site_pkgs:$PYTHONPATH"
+      else
+        export PYTHONPATH="$petals_site_pkgs"
+      fi
+      echo "Exported PYTHONPATH with Petals runtime: $petals_site_pkgs"
     else
-      export PYTHONPATH="$petals_site_pkgs"
+      echo "Using Petals runtime via BEAM_PETALS_SITE_PACKAGES=$petals_site_pkgs"
     fi
-    echo "Exported PYTHONPATH with Petals runtime: $petals_site_pkgs"
   fi
 fi
 

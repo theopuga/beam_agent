@@ -2,8 +2,13 @@ import argparse
 import asyncio
 import logging
 
-from .config import load_config
-from .service import NodeAgent
+try:
+    from .config import load_config
+    from .service import NodeAgent
+except ImportError:
+    # Allow running as a script entrypoint in frozen builds (PyInstaller).
+    from beam_node_agent.config import load_config
+    from beam_node_agent.service import NodeAgent
 
 
 def main():
