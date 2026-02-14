@@ -224,6 +224,7 @@ PY
   hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub==0.17.3}"
   transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.34.1}"
   numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
+  pydantic_spec="${BEAM_PETALS_PYDANTIC_SPEC:-pydantic<2}"
   accelerate_specs="${BEAM_PETALS_ACCELERATE_SPECS:-}"
   if [[ -z "$accelerate_specs" && -n "${BEAM_PETALS_ACCELERATE_SPEC:-}" ]]; then
     accelerate_specs="${BEAM_PETALS_ACCELERATE_SPEC}"
@@ -265,6 +266,7 @@ PY
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
     "${hivemind_pip_args[@]}" \
     "$hivemind_spec"
+  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$pydantic_spec"
   patch_falcon_mqa="${BEAM_PETALS_PATCH_FALCON_MQA:-true}"
   if [[ "$patch_falcon_mqa" == "true" ]]; then
     falcon_block_path="$("$petals_venv/bin/python" - <<'PY'
@@ -348,6 +350,15 @@ PY
     "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2"
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import pydantic
+if int(pydantic.__version__.split(".")[0]) >= 2:
+    raise RuntimeError(f"incompatible pydantic version: {pydantic.__version__}")
+PY
+  then
+    echo "Pydantic 2.x detected; forcing pydantic < 2 for hivemind compatibility"
+    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$pydantic_spec"
+  fi
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import hivemind  # noqa: F401
 from hivemind.optim.grad_scaler import GradScaler  # noqa: F401
 PY
@@ -368,6 +379,7 @@ PY
     "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
       "${hivemind_pip_args[@]}" \
       "$hivemind_spec"
+    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$pydantic_spec"
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import hivemind  # noqa: F401
@@ -385,6 +397,15 @@ if int(numpy.__version__.split(".")[0]) >= 2:
 PY
   then
     echo "ERROR: Petals runtime is still incompatible (numpy)."
+    return 1
+  fi
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import pydantic
+if int(pydantic.__version__.split(".")[0]) >= 2:
+    raise RuntimeError(f"incompatible pydantic version: {pydantic.__version__}")
+PY
+  then
+    echo "ERROR: Petals runtime is still incompatible (pydantic/hivemind)."
     return 1
   fi
   petals_python_real="$petals_venv/bin/python"

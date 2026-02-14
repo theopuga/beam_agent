@@ -617,6 +617,51 @@ class NodeAgent:
             self._inference_tokenizer = tokenizer
             return model, tokenizer
 
+    def _petals_python_sysconfig_paths(self) -> Dict[str, str]:
+        petals_python = os.environ.get("BEAM_PETALS_PYTHON")
+        if not petals_python:
+            return {}
+        try:
+            raw = subprocess.check_output(
+                [
+                    petals_python,
+                    "-c",
+                    (
+                        "import json, sysconfig; "
+                        "paths = sysconfig.get_paths(); "
+                        "print(json.dumps({k: paths.get(k, '') for k in "
+                        "('purelib', 'platlib', 'stdlib', 'platstdlib')}))"
+                    ),
+                ],
+                text=True,
+                timeout=10,
+            ).strip()
+        except Exception:
+            return {}
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+
+        normalized: Dict[str, str] = {}
+        for key, value in parsed.items():
+            if isinstance(value, str) and value.strip():
+                normalized[str(key)] = value.strip()
+        return normalized
+
+    @staticmethod
+    def _normalize_existing_paths(candidates: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for path in candidates:
+            resolved = os.path.realpath(path)
+            if os.path.isdir(resolved) and resolved not in normalized:
+                normalized.append(resolved)
+        return normalized
+
     def _petals_site_package_candidates(self) -> list[str]:
         candidates: list[str] = []
 
@@ -628,36 +673,40 @@ class NodeAgent:
                 if segment.strip()
             )
 
-        petals_python = os.environ.get("BEAM_PETALS_PYTHON")
-        if petals_python:
-            try:
-                purelib = subprocess.check_output(
-                    [
-                        petals_python,
-                        "-c",
-                        "import sysconfig; print(sysconfig.get_paths()['purelib'])",
-                    ],
-                    text=True,
-                    timeout=10,
-                ).strip()
-                if purelib:
-                    candidates.append(purelib)
-            except Exception:
-                # Keep startup resilient; we'll fail later with a clear import error if needed.
-                pass
+        sysconfig_paths = self._petals_python_sysconfig_paths()
+        for key in ("purelib", "platlib"):
+            path = sysconfig_paths.get(key)
+            if path:
+                candidates.append(path)
 
-        normalized: list[str] = []
+        return self._normalize_existing_paths(candidates)
+
+    def _petals_stdlib_candidates(self) -> list[str]:
+        candidates: list[str] = []
+
+        sysconfig_paths = self._petals_python_sysconfig_paths()
+        for key in ("stdlib", "platstdlib"):
+            path = sysconfig_paths.get(key)
+            if path:
+                candidates.append(path)
+
+        expanded: list[str] = []
         for path in candidates:
-            resolved = os.path.realpath(path)
-            if os.path.isdir(resolved) and resolved not in normalized:
-                normalized.append(resolved)
-        return normalized
+            expanded.append(path)
+            lib_dynload = os.path.join(path, "lib-dynload")
+            if os.path.isdir(lib_dynload):
+                expanded.append(lib_dynload)
+
+        return self._normalize_existing_paths(expanded)
 
     def _prepare_inference_imports(self) -> None:
         petals_paths = self._petals_site_package_candidates()
-        if petals_paths:
-            # Ensure the Petals runtime site-packages wins import resolution.
-            for path in reversed(petals_paths):
+        stdlib_paths = self._petals_stdlib_candidates()
+        inference_paths = petals_paths + stdlib_paths
+
+        if inference_paths:
+            # Ensure the Petals runtime paths win import resolution.
+            for path in reversed(inference_paths):
                 if path in sys.path:
                     sys.path.remove(path)
                 sys.path.insert(0, path)
@@ -675,23 +724,20 @@ class NodeAgent:
             log.warning("Removed suspicious sys.path entries before inference import: %s", removed)
         sys.path[:] = cleaned_path
 
-        # If core ML modules were already imported from a non-Petals location, evict them.
+        # Always evict core ML modules before inference imports to avoid partial-import residue.
         for root_name in (
             "numpy",
             "torch",
             "petals",
+            "hivemind",
             "transformers",
             "accelerate",
             "huggingface_hub",
             "tokenizers",
+            "pydantic",
+            "pydantic_core",
+            "annotated_types",
         ):
-            module = sys.modules.get(root_name)
-            module_file = getattr(module, "__file__", None) if module else None
-            if not module_file:
-                continue
-            resolved = os.path.realpath(module_file)
-            if petals_paths and any(resolved.startswith(path + os.sep) for path in petals_paths):
-                continue
             for loaded_name in list(sys.modules):
                 if loaded_name == root_name or loaded_name.startswith(f"{root_name}."):
                     sys.modules.pop(loaded_name, None)
