@@ -300,19 +300,24 @@ class NodeAgent:
         if name and vram_gb and count:
             return {"name": name, "vram_gb": vram_gb, "count": count}
 
+        python_exec = os.environ.get("BEAM_PETALS_PYTHON") or sys.executable
         try:
-            import torch
-
-            if torch.cuda.is_available():
-                device_count = torch.cuda.device_count()
-                props = torch.cuda.get_device_properties(0)
-                total_mem = getattr(props, "total_memory", 0) or 0
+            # Detect GPU using a subprocess to avoid importing torch in this process
+            script = "import torch; print(f'{torch.cuda.device_count()}|{torch.cuda.get_device_properties(0).name}|{torch.cuda.get_device_properties(0).total_memory}') if torch.cuda.is_available() else print('0||0')"
+            result = (
+                subprocess.check_output([python_exec, "-c", script], text=True)
+                .strip()
+                .split("|")
+            )
+            if len(result) == 3 and int(result[0]) > 0:
+                device_count = int(result[0])
+                total_mem = int(result[2])
                 detected_vram = round(float(total_mem) / (1024**3), 2)
-                detected_name = getattr(props, "name", None) or "GPU"
+                detected_name = result[1] or "GPU"
                 return {
                     "name": detected_name,
                     "vram_gb": detected_vram if detected_vram > 0 else 24,
-                    "count": device_count if device_count > 0 else 1,
+                    "count": device_count,
                 }
         except Exception as exc:
             log.warning("GPU detection failed, using defaults: %s", exc)
@@ -499,6 +504,7 @@ class NodeAgent:
                     {"type": "done", "job_id": job_id, "finish_reason": "stop"},
                 )
             except Exception as exc:
+                log.exception("Inference job failed: job_id=%s model_id=%s", job_id, model_id)
                 await self._send_ws(
                     ws,
                     {
@@ -611,12 +617,16 @@ class NodeAgent:
             self._inference_tokenizer = tokenizer
             return model, tokenizer
 
-    def _extend_sys_path_for_petals(self) -> None:
+    def _petals_site_package_candidates(self) -> list[str]:
         candidates: list[str] = []
 
         site_pkgs_env = os.environ.get("BEAM_PETALS_SITE_PACKAGES")
         if site_pkgs_env:
-            candidates.extend(p for p in site_pkgs_env.split(os.pathsep) if p)
+            candidates.extend(
+                segment.strip()
+                for segment in site_pkgs_env.split(os.pathsep)
+                if segment.strip()
+            )
 
         petals_python = os.environ.get("BEAM_PETALS_PYTHON")
         if petals_python:
@@ -633,30 +643,81 @@ class NodeAgent:
                 if purelib:
                     candidates.append(purelib)
             except Exception:
+                # Keep startup resilient; we'll fail later with a clear import error if needed.
                 pass
 
+        normalized: list[str] = []
         for path in candidates:
-            if os.path.isdir(path) and path not in sys.path:
+            resolved = os.path.realpath(path)
+            if os.path.isdir(resolved) and resolved not in normalized:
+                normalized.append(resolved)
+        return normalized
+
+    def _prepare_inference_imports(self) -> None:
+        petals_paths = self._petals_site_package_candidates()
+        if petals_paths:
+            # Ensure the Petals runtime site-packages wins import resolution.
+            for path in reversed(petals_paths):
+                if path in sys.path:
+                    sys.path.remove(path)
                 sys.path.insert(0, path)
 
+        # Guard against accidental ".../numpy" entries which trigger numpy source-tree errors.
+        cleaned_path: list[str] = []
+        removed: list[str] = []
+        for entry in sys.path:
+            resolved = os.path.realpath(entry) if entry else entry
+            if resolved and os.path.basename(resolved.rstrip(os.sep)) == "numpy":
+                removed.append(entry)
+                continue
+            cleaned_path.append(entry)
+        if removed:
+            log.warning("Removed suspicious sys.path entries before inference import: %s", removed)
+        sys.path[:] = cleaned_path
+
+        # If core ML modules were already imported from a non-Petals location, evict them.
+        for root_name in (
+            "numpy",
+            "torch",
+            "petals",
+            "transformers",
+            "accelerate",
+            "huggingface_hub",
+            "tokenizers",
+        ):
+            module = sys.modules.get(root_name)
+            module_file = getattr(module, "__file__", None) if module else None
+            if not module_file:
+                continue
+            resolved = os.path.realpath(module_file)
+            if petals_paths and any(resolved.startswith(path + os.sep) for path in petals_paths):
+                continue
+            for loaded_name in list(sys.modules):
+                if loaded_name == root_name or loaded_name.startswith(f"{root_name}."):
+                    sys.modules.pop(loaded_name, None)
+
     def _load_model_sync(self, model_id: str):
-        self._extend_sys_path_for_petals()
+        self._prepare_inference_imports()
+
+        try:
+            import numpy as _numpy
+        except Exception as exc:
+            raise RuntimeError(
+                "failed to import numpy from the Petals runtime; "
+                f"BEAM_PETALS_SITE_PACKAGES={os.environ.get('BEAM_PETALS_SITE_PACKAGES', '')}"
+            ) from exc
+
+        log.info("Inference runtime numpy: %s (%s)", _numpy.__version__, getattr(_numpy, "__file__", "unknown"))
+
         try:
             from petals import AutoDistributedModelForCausalLM
             from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
-        except ModuleNotFoundError as exc:
-            self._extend_sys_path_for_petals()
-            try:
-                from petals import AutoDistributedModelForCausalLM
-                from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
-            except ModuleNotFoundError as retry_exc:
-                raise RuntimeError(
-                    "petals is not importable in node-agent runtime; "
-                    "ensure BEAM_PETALS_PYTHON/BEAM_PETALS_SITE_PACKAGES are set "
-                    "or rebuild the node-agent binary with petals bundled."
-                ) from retry_exc
-        from transformers import AutoTokenizer
-        import torch
+            from transformers import AutoTokenizer
+            import torch
+        except Exception as exc:
+            raise RuntimeError(
+                "failed to import Petals runtime dependencies in node agent process"
+            ) from exc
 
         tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
         if tokenizer.pad_token is None and tokenizer.eos_token:
