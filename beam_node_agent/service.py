@@ -769,11 +769,13 @@ class NodeAgent:
         if tokenizer.pad_token is None and tokenizer.eos_token:
             tokenizer.pad_token = tokenizer.eos_token
 
+        log.info(f"Loading Distributed Model: {model_id}...")
         model = AutoDistributedModelForCausalLM.from_pretrained(
             model_id,
             initial_peers=PUBLIC_INITIAL_PEERS,
             torch_dtype=DTYPE_MAP.get("float16", torch.float16),
         )
+        log.info(f"Model {model_id} loaded successfully.")
         model.eval()
         return model, tokenizer
 
@@ -1024,8 +1026,14 @@ class NodeAgent:
 
             if not self.config.agent.mock_inference:
                 range_str = f"{new_range[0]}:{new_range[1]}"
+                log.info(f"Applying new assignment: model={new_mid}, range={range_str}")
                 self.petals.stop()
-                self.petals.start(new_mid, range_str)
+                try:
+                    self.petals.start(new_mid, range_str)
+                except Exception as e:
+                    log.error(f"Failed to start Petals for {new_mid} [{range_str}]: {e}")
+                    return
+
                 if self._petals_check_task:
                     self._petals_check_task.cancel()
                 self._petals_check_task = asyncio.create_task(
