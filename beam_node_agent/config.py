@@ -85,6 +85,12 @@ def load_config(config_path: str = "config.yaml") -> BeamConfig:
         agent_data["mock_inference"] = (
             os.environ["BEAM_MOCK_INFERENCE"].lower() == "true"
         )
+        
+    capabilities = agent_data.get("capabilities", {})
+    if "BEAM_MAX_BLOCKS" in os.environ:
+        capabilities["max_blocks"] = int(os.environ["BEAM_MAX_BLOCKS"])
+    if capabilities:
+        agent_data["capabilities"] = capabilities
 
     config = BeamConfig(
         control_plane=ControlPlaneConfig(**cp_data),
