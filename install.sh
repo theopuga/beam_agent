@@ -459,8 +459,8 @@ else
 fi
 start_now=${start_now:-Y}
 if [[ ! "$start_now" =~ ^[Yy]$ ]]; then
-  echo "You can start it later with:"
-  echo "$binary_path --config $config_path"
+echo "You can start it later with:"
+  echo "./start_agent.sh"
   exit 0
 fi
 
@@ -487,14 +487,23 @@ PY
   fi
 fi
 
-echo "Running: $binary_path --config $config_path"
-export BEAM_CONTROL_PLANE_URL="$control_plane_url"
-export CONTROL_PLANE_URL="$control_plane_url"
-
 if [[ "${BEAM_SINGLE_NODE:-}" == "true" ]]; then
   export BEAM_HOP_COUNTS="A=1,B=1,C=1"
   echo "Single-node mode enabled. BEAM_HOP_COUNTS set to $BEAM_HOP_COUNTS"
 fi
 
+cat > start_agent.sh <<EOF
+#!/usr/bin/env bash
+export BEAM_PETALS_PYTHON="${BEAM_PETALS_PYTHON:-}"
+export BEAM_CONTROL_PLANE_URL="$control_plane_url"
+export CONTROL_PLANE_URL="$control_plane_url"
+export BEAM_HOP_COUNTS="${BEAM_HOP_COUNTS:-}"
+export BEAM_SINGLE_NODE="${BEAM_SINGLE_NODE:-}"
 exec "$binary_path" --config "$config_path"
+EOF
+chmod +x start_agent.sh
+
+echo "Running: ./start_agent.sh"
+exec ./start_agent.sh
+
 
