@@ -6,7 +6,11 @@ echo "This will download the agent, write a config, and start pairing."
 echo "Keep this terminal open to see the pairing code."
 echo
 
-read -r -p "Continue? [Y/n]: " confirm < /dev/tty
+if [[ "${BEAM_ACCEPT_DEFAULTS:-}" == "true" ]]; then
+  confirm="Y"
+else
+  read -r -p "Continue? [Y/n]: " confirm < /dev/tty || confirm="Y"
+fi
 confirm=${confirm:-Y}
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
   echo "Aborted."
@@ -18,7 +22,11 @@ control_plane_url="${control_plane_url%/}"
 echo "Control plane URL: $control_plane_url"
 
 release_base_default="https://github.com/theopuga/beam_agent/releases/latest/download"
-read -r -p "Release base URL [$release_base_default]: " release_base < /dev/tty
+if [[ "${BEAM_ACCEPT_DEFAULTS:-}" == "true" ]]; then
+  release_base=""
+else
+  read -r -p "Release base URL [$release_base_default]: " release_base < /dev/tty || release_base=""
+fi
 release_base=${release_base:-$release_base_default}
 release_base="${release_base%/}"
 
@@ -37,7 +45,11 @@ archive_path="./$archive_name"
 download_url="$release_base/$archive_name"
 
 if [[ -f "$archive_path" ]]; then
-  read -r -p "$archive_path exists. Redownload? [y/N]: " redownload < /dev/tty
+  if [[ "${BEAM_ACCEPT_DEFAULTS:-}" == "true" ]]; then
+    redownload="N"
+  else
+    read -r -p "$archive_path exists. Redownload? [y/N]: " redownload < /dev/tty || redownload="N"
+  fi
   redownload=${redownload:-N}
   if [[ "$redownload" =~ ^[Yy]$ ]]; then
     curl -fL "$download_url" -o "$archive_path"
@@ -71,7 +83,11 @@ fi
 
 chmod +x "$binary_path"
 
-read -r -p "Config path [config.yaml] (press Enter for default): " config_path < /dev/tty
+if [[ "${BEAM_ACCEPT_DEFAULTS:-}" == "true" ]]; then
+  config_path="config.yaml"
+else
+  read -r -p "Config path [config.yaml] (press Enter for default): " config_path < /dev/tty || config_path=""
+fi
 case "${config_path,,}" in
   "" )
     config_path="config.yaml"
@@ -83,7 +99,11 @@ case "${config_path,,}" in
 esac
 
 if [[ -f "$config_path" ]]; then
-  read -r -p "$config_path exists. Overwrite? [y/N]: " overwrite < /dev/tty
+  if [[ "${BEAM_ACCEPT_DEFAULTS:-}" == "true" ]]; then
+    overwrite="N"
+  else
+    read -r -p "$config_path exists. Overwrite? [y/N]: " overwrite < /dev/tty || overwrite="N"
+  fi
   overwrite=${overwrite:-N}
   if [[ "$overwrite" =~ ^[Yy]$ ]]; then
     cat > "$config_path" <<EOF
@@ -432,7 +452,11 @@ EOF
 
 echo
 
-read -r -p "Start the agent now? [Y/n]: " start_now < /dev/tty
+if [[ "${BEAM_ACCEPT_DEFAULTS:-}" == "true" ]]; then
+  start_now="Y"
+else
+  read -r -p "Start the agent now? [Y/n]: " start_now < /dev/tty || start_now="Y"
+fi
 start_now=${start_now:-Y}
 if [[ ! "$start_now" =~ ^[Yy]$ ]]; then
   echo "You can start it later with:"
@@ -466,4 +490,11 @@ fi
 echo "Running: $binary_path --config $config_path"
 export BEAM_CONTROL_PLANE_URL="$control_plane_url"
 export CONTROL_PLANE_URL="$control_plane_url"
+
+if [[ "${BEAM_SINGLE_NODE:-}" == "true" ]]; then
+  export BEAM_HOP_COUNTS="A=1,B=1,C=1"
+  echo "Single-node mode enabled. BEAM_HOP_COUNTS set to $BEAM_HOP_COUNTS"
+fi
+
 exec "$binary_path" --config "$config_path"
+
