@@ -489,7 +489,8 @@ fi
 
 if [[ "${BEAM_SINGLE_NODE:-}" == "true" ]]; then
   export BEAM_HOP_COUNTS="A=1,B=1,C=1"
-  echo "Single-node mode enabled. BEAM_HOP_COUNTS set to $BEAM_HOP_COUNTS"
+  export BEAM_MAX_BLOCKS=40
+  echo "Single-node mode enabled. BEAM_HOP_COUNTS set to $BEAM_HOP_COUNTS and BEAM_MAX_BLOCKS to $BEAM_MAX_BLOCKS"
 fi
 
 cat > start_agent.sh <<EOF
@@ -499,6 +500,7 @@ export BEAM_CONTROL_PLANE_URL="$control_plane_url"
 export CONTROL_PLANE_URL="$control_plane_url"
 export BEAM_HOP_COUNTS="${BEAM_HOP_COUNTS:-}"
 export BEAM_SINGLE_NODE="${BEAM_SINGLE_NODE:-}"
+export BEAM_MAX_BLOCKS="${BEAM_MAX_BLOCKS:-}"
 exec "$binary_path" --config "$config_path"
 EOF
 chmod +x start_agent.sh
