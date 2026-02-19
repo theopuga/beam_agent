@@ -241,8 +241,8 @@ PY
       "$petals_venv/bin/python" -m pip install --upgrade "$torch_spec" "$torchvision_spec" "$torchaudio_spec"
     fi
   fi
-  hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub==0.20.3}"
-  transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.38.1}"
+  hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub==0.17.3}"
+  transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers==4.33.0}"
   numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
   pydantic_spec="${BEAM_PETALS_PYDANTIC_SPEC:-pydantic<2.0.0}"
   accelerate_specs="${BEAM_PETALS_ACCELERATE_SPECS:-}"
