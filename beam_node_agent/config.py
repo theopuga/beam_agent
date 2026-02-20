@@ -65,13 +65,13 @@ def load_config(config_path: str = "config.yaml") -> BeamConfig:
         cp_data["url"] = os.environ["BEAM_CONTROL_PLANE_URL"]
 
     petals_data = config_data.get("petals", {})
-    if "PETALS_PORT" in os.environ:
+    if os.environ.get("PETALS_PORT", "").strip():
         petals_data["port"] = int(os.environ["PETALS_PORT"])
 
     agent_data = config_data.get("agent", {})
     if "BEAM_PAIRING_TOKEN" in os.environ:
         agent_data["pairing_token"] = os.environ["BEAM_PAIRING_TOKEN"]
-    if "BEAM_PAIRING_PORT" in os.environ:
+    if os.environ.get("BEAM_PAIRING_PORT", "").strip():
         agent_data["pairing_ports"] = [int(os.environ["BEAM_PAIRING_PORT"])]
     if "BEAM_PAIRING_PORTS" in os.environ:
         ports = []
@@ -87,7 +87,7 @@ def load_config(config_path: str = "config.yaml") -> BeamConfig:
         )
         
     capabilities = agent_data.get("capabilities", {})
-    if "BEAM_MAX_BLOCKS" in os.environ:
+    if os.environ.get("BEAM_MAX_BLOCKS", "").strip():
         capabilities["max_blocks"] = int(os.environ["BEAM_MAX_BLOCKS"])
     if capabilities:
         agent_data["capabilities"] = capabilities

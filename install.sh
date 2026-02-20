@@ -473,16 +473,16 @@ if [[ "${BEAM_SINGLE_NODE:-}" == "true" ]]; then
   echo "Single-node mode enabled. BEAM_HOP_COUNTS set to $BEAM_HOP_COUNTS and BEAM_MAX_BLOCKS to $BEAM_MAX_BLOCKS"
 fi
 
-cat > start_agent.sh <<EOF
-#!/usr/bin/env bash
-export BEAM_PETALS_PYTHON="${BEAM_PETALS_PYTHON:-}"
-export BEAM_CONTROL_PLANE_URL="$control_plane_url"
-export CONTROL_PLANE_URL="$control_plane_url"
-export BEAM_HOP_COUNTS="${BEAM_HOP_COUNTS:-}"
-export BEAM_SINGLE_NODE="${BEAM_SINGLE_NODE:-}"
-export BEAM_MAX_BLOCKS="${BEAM_MAX_BLOCKS:-}"
-exec "$binary_path" --config "$config_path"
-EOF
+{
+  echo '#!/usr/bin/env bash'
+  [[ -n "${BEAM_PETALS_PYTHON:-}" ]] && echo "export BEAM_PETALS_PYTHON=\"${BEAM_PETALS_PYTHON}\""
+  echo "export BEAM_CONTROL_PLANE_URL=\"$control_plane_url\""
+  echo "export CONTROL_PLANE_URL=\"$control_plane_url\""
+  [[ -n "${BEAM_HOP_COUNTS:-}" ]] && echo "export BEAM_HOP_COUNTS=\"${BEAM_HOP_COUNTS}\""
+  [[ -n "${BEAM_SINGLE_NODE:-}" ]] && echo "export BEAM_SINGLE_NODE=\"${BEAM_SINGLE_NODE}\""
+  [[ -n "${BEAM_MAX_BLOCKS:-}" ]] && echo "export BEAM_MAX_BLOCKS=\"${BEAM_MAX_BLOCKS}\""
+  echo "exec \"$binary_path\" --config \"$config_path\""
+} > start_agent.sh
 chmod +x start_agent.sh
 
 echo "Running: ./start_agent.sh"
