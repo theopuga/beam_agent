@@ -1,0 +1,69 @@
+name: Build and Release Binary
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create / update (e.g. v0.1.12)"
+        required: true
+
+jobs:
+  build-linux:
+    name: Build Linux binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller aiohttp pyyaml "pydantic>=2.0"
+
+      - name: Build binary (PyInstaller onedir)
+        run: |
+          pyinstaller beam-node-agent-linux.spec
+
+      # ------------------------------------------------------------------ #
+      # The onedir output is dist/beam-node-agent-linux/<files>.             #
+      # Produce two release assets:                                           #
+      #   • beam-node-agent-linux        – the EXE (for direct curl usage)  #
+      #   • beam-node-agent-linux.tar.gz – full onedir bundle               #
+      # ------------------------------------------------------------------ #
+      - name: Package artifacts
+        run: |
+          cp dist/beam-node-agent-linux/beam-node-agent-linux ./beam-node-agent-linux
+          tar -czf beam-node-agent-linux.tar.gz \
+              -C dist/beam-node-agent-linux .
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Beam Node Agent ${{ steps.tag.outputs.tag }}"
+          body: |
+            Automated binary build from commit ${{ github.sha }}.
+          files: |
+            beam-node-agent-linux
+            beam-node-agent-linux.tar.gz
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

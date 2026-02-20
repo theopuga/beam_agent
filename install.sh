@@ -43,6 +43,68 @@ esac
 binary_path="./$asset_name"
 download_url="$release_base/$asset_name"
 
+# -----------------------------------------------------------------------
+# BEAM_RUN_FROM_SOURCE=true  — run the agent from Python source instead
+# of the pre-built binary.  Use this when a new binary hasn't been built
+# yet, or when you want to test local changes without a full PyInstaller
+# build.
+#
+# What it does:
+#   1. Clones / updates the source from GitHub (or uses BEAM_SOURCE_DIR).
+#   2. Creates a minimal "beam-agent-venv" with only the three packages
+#      the agent itself needs (aiohttp, pyyaml, pydantic>=2).
+#   3. Generates start_agent.sh that runs:
+#        beam-agent-venv/bin/python -m beam_node_agent.main --config …
+#
+# The heavy ML work (torch / petals) is still done in the SEPARATE
+# BEAM_PETALS_PYTHON subprocess, exactly as in the binary.
+# -----------------------------------------------------------------------
+if [[ "${BEAM_RUN_FROM_SOURCE:-false}" == "true" ]]; then
+  source_repo="${BEAM_SOURCE_REPO:-https://github.com/theopuga/beam_agent}"
+  source_dir="${BEAM_SOURCE_DIR:-./beam_agent_src}"
+
+  if [[ -d "$source_dir/.git" ]]; then
+    echo "Updating agent source in $source_dir …"
+    git -C "$source_dir" pull --ff-only || git -C "$source_dir" fetch --all
+  else
+    echo "Cloning agent source from $source_repo into $source_dir …"
+    git clone "$source_repo" "$source_dir"
+  fi
+
+  agent_venv="${BEAM_AGENT_VENV_DIR:-./beam-agent-venv}"
+  if [[ ! -d "$agent_venv" ]]; then
+    echo "Creating agent venv at $agent_venv …"
+    python3 -m venv "$agent_venv"
+    "$agent_venv/bin/pip" install --upgrade pip
+    "$agent_venv/bin/pip" install aiohttp pyyaml "pydantic>=2.0"
+  else
+    echo "Using existing agent venv at $agent_venv"
+  fi
+
+  # Assemble start_agent.sh (source-based variant)
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -euo pipefail'
+    [[ -n "${BEAM_PETALS_PYTHON:-}" ]] && echo "export BEAM_PETALS_PYTHON=\"${BEAM_PETALS_PYTHON}\""
+    echo "export BEAM_CONTROL_PLANE_URL=\"$control_plane_url\""
+    echo "export CONTROL_PLANE_URL=\"$control_plane_url\""
+    [[ -n "${BEAM_HOP_COUNTS:-}" ]] && echo "export BEAM_HOP_COUNTS=\"${BEAM_HOP_COUNTS}\""
+    [[ -n "${BEAM_SINGLE_NODE:-}" ]] && echo "export BEAM_SINGLE_NODE=\"${BEAM_SINGLE_NODE}\""
+    [[ -n "${BEAM_MAX_BLOCKS:-}" ]] && echo "export BEAM_MAX_BLOCKS=\"${BEAM_MAX_BLOCKS}\""
+    echo "cd \"$(realpath "$source_dir")\""
+    echo "exec \"$(realpath "$agent_venv")/bin/python\" -m beam_node_agent.main --config \"$(realpath "$config_path")\""
+  } > start_agent.sh
+  chmod +x start_agent.sh
+
+  echo
+  echo "Source-based start script written to start_agent.sh"
+  echo "Running: ./start_agent.sh"
+  exec ./start_agent.sh
+fi
+
+# -----------------------------------------------------------------------
+# Default path: download the pre-built binary from GitHub Releases.
+# -----------------------------------------------------------------------
 if [[ -f "$binary_path" ]]; then
   if [[ "${BEAM_ACCEPT_DEFAULTS:-}" == "true" ]]; then
     redownload="N"
