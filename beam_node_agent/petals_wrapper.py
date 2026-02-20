@@ -49,10 +49,12 @@ class PetalsWrapper:
         self._last_exit_time = int(time.time())
         log.warning("Petals process exited with code %s", exit_code)
 
-    def start(self, model_id: str, block_range: str):
+    def start(self, model_id: str, block_range: str, initial_peers: Optional[list] = None):
         """
         Starts the Petals server subprocess.
         block_range expected format: "start:end" (e.g., "0:4")
+        initial_peers: list of multiaddr strings for beam's DHT bootstrap nodes.
+                       If None or empty the petals server uses PUBLIC_INITIAL_PEERS.
         """
         if self.is_running():
             log.warning(
@@ -74,6 +76,11 @@ class PetalsWrapper:
             "--torch_dtype",
             "float16",  # Default optimization
         ]
+
+        # If the backend provided explicit DHT bootstrap peers, pass them so the
+        # petals server joins the beam private swarm instead of the public one.
+        if initial_peers:
+            cmd.extend(["--initial_peers"] + list(initial_peers))
 
         # Add public IP if configured (crucial for p2p)
         if self.public_ip:

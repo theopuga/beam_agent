@@ -39,6 +39,7 @@ import json
 import os
 import sys
 import threading
+import time
 
 
 def _emit(obj):
@@ -50,6 +51,17 @@ def main():
     model = None
     tokenizer = None
     current_model_id = None
+
+    # initial_peers can be provided via env var (JSON-encoded list).
+    # If not set, petals falls back to PUBLIC_INITIAL_PEERS.
+    _peers_env = os.environ.get("BEAM_INFERENCE_INITIAL_PEERS", "")
+    try:
+        _initial_peers = json.loads(_peers_env) if _peers_env else None
+    except Exception:
+        _initial_peers = None
+
+    # Maximum seconds to wait for the first token before aborting.
+    _inference_timeout = int(os.environ.get("BEAM_INFERENCE_TIMEOUT", "120"))
 
     _emit({"type": "ready"})
 
@@ -80,9 +92,10 @@ def main():
                 if tokenizer.pad_token is None and tokenizer.eos_token:
                     tokenizer.pad_token = tokenizer.eos_token
 
+                peers = _initial_peers if _initial_peers else PUBLIC_INITIAL_PEERS
                 model = AutoDistributedModelForCausalLM.from_pretrained(
                     model_id,
-                    initial_peers=PUBLIC_INITIAL_PEERS,
+                    initial_peers=peers,
                     torch_dtype=DTYPE_MAP.get("float16", torch.float16),
                 )
                 model.eval()
@@ -108,17 +121,39 @@ def main():
             if do_sample:
                 gen_kwargs["temperature"] = temperature
 
-            t = threading.Thread(
-                target=model.generate, kwargs=gen_kwargs, daemon=True
-            )
+            gen_error = []
+
+            def _gen():
+                try:
+                    model.generate(**gen_kwargs)
+                except Exception as exc:
+                    gen_error.append(exc)
+
+            t = threading.Thread(target=_gen, daemon=True)
             t.start()
+
+            deadline = time.monotonic() + _inference_timeout
+            got_first_token = False
             for token in streamer:
+                if not got_first_token:
+                    got_first_token = True
+                if time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f"Inference timed out after {_inference_timeout}s. "
+                        "The model swarm may not have all blocks online."
+                    )
                 _emit({"type": "token", "job_id": job_id, "token": token})
-            t.join()
+
+            t.join(timeout=5)
+            if gen_error:
+                raise gen_error[0]
             _emit({"type": "done", "job_id": job_id})
 
         except Exception as exc:
             import traceback as _tb
+            # Reset the cached model if it may be in a bad state after an error.
+            model = None
+            current_model_id = None
             _emit({
                 "type": "error",
                 "job_id": job_id,
@@ -144,9 +179,15 @@ class _InferenceSubprocess:
     with the PyInstaller binary's embedded runtime.
     """
 
-    def __init__(self, petals_python: str, script_path: str) -> None:
+    def __init__(
+        self,
+        petals_python: str,
+        script_path: str,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> None:
         self._python = petals_python
         self._script = script_path
+        self._extra_env = extra_env or {}
         self._proc: Optional[subprocess.Popen] = None
         self._ready = False
         # Serialise access: only one job at a time (mirrors _inference_lock above)
@@ -166,6 +207,7 @@ class _InferenceSubprocess:
             self._python, self._script,
         )
         env = os.environ.copy()
+        env.update(self._extra_env)  # overlay beam-specific vars (peers, timeout, etc.)
         self._proc = subprocess.Popen(
             [self._python, self._script],
             stdin=subprocess.PIPE,
@@ -830,7 +872,29 @@ class NodeAgent:
         if self._inference_worker is None:
             petals_python = os.environ.get("BEAM_PETALS_PYTHON") or sys.executable
             script_path = self._get_or_write_worker_script()
-            self._inference_worker = _InferenceSubprocess(petals_python, script_path)
+
+            # Build extra env vars for the worker subprocess.
+            extra_env: Dict[str, str] = {}
+
+            # Pass beam DHT initial_peers (from current assignment) so the worker
+            # connects to the beam private swarm rather than the public Petals swarm.
+            assignment_peers = (
+                self.current_assignment.get("initial_peers")
+                if self.current_assignment
+                else None
+            )
+            if assignment_peers:
+                extra_env["BEAM_INFERENCE_INITIAL_PEERS"] = json.dumps(assignment_peers)
+                log.info("Inference worker will use %d beam DHT peer(s)", len(assignment_peers))
+            else:
+                log.info(
+                    "No beam DHT peers in assignment — inference worker will use "
+                    "PUBLIC_INITIAL_PEERS (public Petals swarm)"
+                )
+
+            self._inference_worker = _InferenceSubprocess(
+                petals_python, script_path, extra_env=extra_env
+            )
             log.info(
                 "Created inference worker (python=%s, script=%s)",
                 petals_python, script_path,
@@ -1134,11 +1198,19 @@ class NodeAgent:
             or new_epoch != current_epoch
         )
         if changed:
+            # initial_peers: list of multiaddrs from the backend (beam DHT bootstrap).
+            # Falls back to None which means the petals server / inference worker
+            # will use PUBLIC_INITIAL_PEERS.
+            new_peers: Optional[list] = assignment.get("initial_peers") or None
+            if isinstance(new_peers, list) and not new_peers:
+                new_peers = None  # empty list → treat as "not provided"
+
             log.info(f"New assignment received: {new_mid} blocks {new_range}")
             self.current_assignment = {
                 "model_id": new_mid,
                 "block_range": [int(new_range[0]), int(new_range[1])],
                 "assignment_epoch": new_epoch,
+                "initial_peers": new_peers,
             }
 
             if not self.config.agent.mock_inference:
@@ -1146,7 +1218,7 @@ class NodeAgent:
                 log.info(f"Applying new assignment: model={new_mid}, range={range_str}")
                 self.petals.stop()
                 try:
-                    self.petals.start(new_mid, range_str)
+                    self.petals.start(new_mid, range_str, initial_peers=new_peers)
                 except Exception as e:
                     log.error(f"Failed to start Petals for {new_mid} [{range_str}]: {e}")
                     return
