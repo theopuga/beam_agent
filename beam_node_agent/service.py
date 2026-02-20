@@ -4,9 +4,10 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, Optional
 
 import aiohttp
 from aiohttp import web
@@ -16,6 +17,273 @@ from .node_identity import NodeIdentity
 from .petals_wrapper import PetalsWrapper
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Inference worker script
+# ---------------------------------------------------------------------------
+# This script is written to a temp file and launched as a subprocess using
+# BEAM_PETALS_PYTHON (the real petals-venv Python, not the PyInstaller binary).
+# Running as a separate process means torch / hivemind / petals can be imported
+# normally — no sys.path surgery, no C-extension conflicts.
+#
+# Protocol (newline-delimited JSON on stdin/stdout):
+#   stdin  ← {"job_id":…, "model_id":…, "prompt":…,
+#               "max_new_tokens":…, "temperature":…}
+#   stdout → {"type":"ready"}                          (once, at startup)
+#           → {"type":"token",  "job_id":…, "token":…} (per token)
+#           → {"type":"done",   "job_id":…}            (end of job)
+#           → {"type":"error",  "job_id":…, "message":…, "traceback":…}
+# ---------------------------------------------------------------------------
+_INFERENCE_WORKER_SCRIPT = r"""
+import json
+import os
+import sys
+import threading
+
+
+def _emit(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    model = None
+    tokenizer = None
+    current_model_id = None
+
+    _emit({"type": "ready"})
+
+    for raw in sys.stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            req = json.loads(raw)
+        except Exception:
+            continue
+
+        job_id = req.get("job_id", "")
+        model_id = req.get("model_id", "")
+        prompt = req.get("prompt", "")
+        max_new_tokens = int(req.get("max_new_tokens") or 256)
+        temperature = float(req.get("temperature") or 1.0)
+        do_sample = temperature > 0.0
+
+        try:
+            if model is None or current_model_id != model_id:
+                from petals import AutoDistributedModelForCausalLM
+                from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
+                from transformers import AutoTokenizer
+                import torch
+
+                tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
+                if tokenizer.pad_token is None and tokenizer.eos_token:
+                    tokenizer.pad_token = tokenizer.eos_token
+
+                model = AutoDistributedModelForCausalLM.from_pretrained(
+                    model_id,
+                    initial_peers=PUBLIC_INITIAL_PEERS,
+                    torch_dtype=DTYPE_MAP.get("float16", torch.float16),
+                )
+                model.eval()
+                current_model_id = model_id
+
+            from transformers import TextIteratorStreamer
+
+            inputs = tokenizer(prompt, return_tensors="pt")
+            try:
+                inputs = inputs.to(model.device)
+            except Exception:
+                pass
+
+            streamer = TextIteratorStreamer(
+                tokenizer, skip_prompt=True, skip_special_tokens=True
+            )
+            gen_kwargs = dict(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=do_sample,
+                streamer=streamer,
+            )
+            if do_sample:
+                gen_kwargs["temperature"] = temperature
+
+            t = threading.Thread(
+                target=model.generate, kwargs=gen_kwargs, daemon=True
+            )
+            t.start()
+            for token in streamer:
+                _emit({"type": "token", "job_id": job_id, "token": token})
+            t.join()
+            _emit({"type": "done", "job_id": job_id})
+
+        except Exception as exc:
+            import traceback as _tb
+            _emit({
+                "type": "error",
+                "job_id": job_id,
+                "message": str(exc),
+                "traceback": _tb.format_exc(),
+            })
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+class _InferenceSubprocess:
+    """
+    Manages a persistent Python subprocess (launched via BEAM_PETALS_PYTHON)
+    that keeps the petals distributed model loaded and serves inference
+    requests via a newline-delimited JSON stdin/stdout protocol.
+
+    Because it runs as a separate OS process using the real petals-venv
+    Python interpreter, it has full access to torch, hivemind, petals,
+    and all C-extension stdlib modules (cmath, etc.) without conflicting
+    with the PyInstaller binary's embedded runtime.
+    """
+
+    def __init__(self, petals_python: str, script_path: str) -> None:
+        self._python = petals_python
+        self._script = script_path
+        self._proc: Optional[subprocess.Popen] = None
+        self._ready = False
+        # Serialise access: only one job at a time (mirrors _inference_lock above)
+        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def _ensure_started(self) -> None:
+        """Start (or restart) the worker subprocess if it is not alive."""
+        if self._proc is not None and self._proc.poll() is None:
+            return  # still running
+
+        log.info(
+            "Starting inference worker subprocess (python=%s script=%s)",
+            self._python, self._script,
+        )
+        env = os.environ.copy()
+        self._proc = subprocess.Popen(
+            [self._python, self._script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        self._ready = False
+
+        # Drain stderr in a background thread so it doesn't block.
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
+
+        # Block until the worker signals "ready" (or the process dies).
+        assert self._proc.stdout is not None
+        for line in self._proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except Exception:
+                log.warning("InferenceWorker unexpected startup output: %s", line)
+                continue
+            if msg.get("type") == "ready":
+                self._ready = True
+                log.info("Inference worker subprocess ready.")
+                break
+            if msg.get("type") == "error":
+                log.error("Inference worker startup error: %s", msg.get("message"))
+                break
+        else:
+            # stdout closed without a ready signal — process likely died.
+            log.error("Inference worker subprocess exited before signalling ready.")
+
+    def _drain_stderr(self) -> None:
+        if self._proc and self._proc.stderr:
+            for line in self._proc.stderr:
+                log.info("InferenceWorker stderr: %s", line.rstrip())
+
+    def stop(self) -> None:
+        if self._proc:
+            try:
+                if self._proc.stdin:
+                    self._proc.stdin.close()
+                self._proc.terminate()
+                self._proc.wait(timeout=5)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+        self._proc = None
+        self._ready = False
+
+    def is_alive(self) -> bool:
+        return self._ready and self._proc is not None and self._proc.poll() is None
+
+    # ------------------------------------------------------------------
+    # Job execution
+    # ------------------------------------------------------------------
+
+    def run_job(
+        self,
+        job_id: str,
+        model_id: str,
+        prompt: str,
+        max_new_tokens: int,
+        temperature: float,
+    ) -> Iterator[dict]:
+        """
+        Send one inference job to the worker and yield response dicts.
+        Blocks the calling thread until the job completes (or errors).
+        Caller must hold the inference lock so only one job runs at a time.
+        """
+        with self._lock:
+            self._ensure_started()
+            if not self._ready or self._proc is None:
+                yield {
+                    "type": "error",
+                    "job_id": job_id,
+                    "message": "inference worker failed to start",
+                }
+                return
+
+            req = json.dumps({
+                "job_id": job_id,
+                "model_id": model_id,
+                "prompt": prompt,
+                "max_new_tokens": max_new_tokens,
+                "temperature": temperature,
+            })
+            assert self._proc.stdin is not None
+            try:
+                self._proc.stdin.write(req + "\n")
+                self._proc.stdin.flush()
+            except Exception as exc:
+                yield {
+                    "type": "error",
+                    "job_id": job_id,
+                    "message": f"failed to send job to worker: {exc}",
+                }
+                return
+
+            assert self._proc.stdout is not None
+            for line in self._proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except Exception:
+                    log.warning("InferenceWorker non-JSON output: %s", line)
+                    continue
+                yield msg
+                if msg.get("type") in ("done", "error"):
+                    break
 
 
 class NodeAgent:
@@ -41,15 +309,11 @@ class NodeAgent:
         self._ws_task: Optional[asyncio.Task] = None
         self._ws_send_lock = asyncio.Lock()
         self._inference_lock = asyncio.Lock()
-        self._model_lock = asyncio.Lock()
-        self._inference_model_id: Optional[str] = None
-        self._inference_model: Optional[object] = None
-        self._inference_tokenizer: Optional[object] = None
+        self._model_lock = asyncio.Lock()  # kept for compatibility; no longer guards model loading
         self._petals_check_task: Optional[asyncio.Task] = None
-        # Set to True when a torch/petals C-extension import corruption is detected.
-        # Once corrupted, the process must be restarted; we short-circuit further attempts.
-        self._inference_import_failed: bool = False
-        self._inference_import_error: Optional[str] = None
+        # Persistent inference worker subprocess (uses BEAM_PETALS_PYTHON)
+        self._inference_worker: Optional[_InferenceSubprocess] = None
+        self._inference_worker_script: Optional[str] = None
 
     async def start(self):
         log.info("Starting Beam Node Agent...")
@@ -495,6 +759,7 @@ class NodeAgent:
         async with self._inference_lock:
             try:
                 async for token in self._run_inference(
+                    job_id=job_id,
                     model_id=model_id,
                     messages=messages,
                     max_tokens=max_tokens,
@@ -541,305 +806,95 @@ class NodeAgent:
                 return
             await ws.send_json(payload)
 
+    # ------------------------------------------------------------------
+    # Inference worker helpers
+    # ------------------------------------------------------------------
+
+    def _get_or_write_worker_script(self) -> str:
+        """Write the inference worker script to a temp file (once) and return its path."""
+        if self._inference_worker_script and os.path.exists(self._inference_worker_script):
+            return self._inference_worker_script
+        fd, path = tempfile.mkstemp(suffix=".py", prefix="beam_inference_worker_")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(_INFERENCE_WORKER_SCRIPT)
+        except Exception:
+            os.close(fd)
+            raise
+        log.info("Inference worker script written to: %s", path)
+        self._inference_worker_script = path
+        return path
+
+    def _ensure_inference_worker(self) -> _InferenceSubprocess:
+        """Return the inference worker, creating it if necessary."""
+        if self._inference_worker is None:
+            petals_python = os.environ.get("BEAM_PETALS_PYTHON") or sys.executable
+            script_path = self._get_or_write_worker_script()
+            self._inference_worker = _InferenceSubprocess(petals_python, script_path)
+            log.info(
+                "Created inference worker (python=%s, script=%s)",
+                petals_python, script_path,
+            )
+        return self._inference_worker
+
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
+
     async def _run_inference(
         self,
         *,
+        job_id: str = "",
         model_id: str,
         messages: list,
         max_tokens: Optional[int],
         temperature: Optional[float],
     ) -> AsyncIterator[str]:
+        """
+        Run a single inference job via the persistent worker subprocess.
+
+        The worker runs under BEAM_PETALS_PYTHON (the real petals-venv Python),
+        so it has full access to torch, cmath, and all other C-extension stdlib
+        modules — none of which are available inside the PyInstaller binary process.
+        """
         prompt = self._format_messages(messages)
         max_new_tokens = max_tokens if max_tokens and max_tokens > 0 else 256
         temp_value = 1.0 if temperature is None else float(temperature)
-        do_sample = temp_value > 0
 
-        model, tokenizer = await self._get_inference_model(model_id)
+        worker = self._ensure_inference_worker()
         queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
-        def _worker():
+        def _thread():
             try:
-                from transformers import TextIteratorStreamer
-
-                inputs = tokenizer(prompt, return_tensors="pt")
-                try:
-                    inputs = inputs.to(model.device)
-                except Exception:
-                    pass
-
-                streamer = TextIteratorStreamer(
-                    tokenizer, skip_prompt=True, skip_special_tokens=True
-                )
-
-                gen_kwargs = {
-                    **inputs,
-                    "max_new_tokens": max_new_tokens,
-                    "do_sample": do_sample,
-                    "streamer": streamer,
-                }
-                if do_sample:
-                    gen_kwargs["temperature"] = temp_value
-
-                thread = threading.Thread(
-                    target=model.generate, kwargs=gen_kwargs, daemon=True
-                )
-                thread.start()
-                for token in streamer:
-                    loop.call_soon_threadsafe(queue.put_nowait, ("token", token))
-                thread.join()
-                loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+                for msg in worker.run_job(
+                    job_id=job_id or "job",
+                    model_id=model_id,
+                    prompt=prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temp_value,
+                ):
+                    loop.call_soon_threadsafe(queue.put_nowait, msg)
             except Exception as exc:
-                loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": str(exc)},
+                )
 
-        threading.Thread(target=_worker, daemon=True).start()
+        threading.Thread(target=_thread, daemon=True).start()
 
         while True:
-            kind, value = await queue.get()
-            if kind == "token":
-                yield value
-            elif kind == "done":
+            msg = await queue.get()
+            mtype = msg.get("type")
+            if mtype == "token":
+                yield msg.get("token", "")
+            elif mtype == "done":
                 return
             else:
-                raise Exception(value)
-
-    async def _get_inference_model(self, model_id: str):
-        # Short-circuit immediately if a prior attempt corrupted torch C-extensions.
-        # Re-importing torch in the same process after this failure is impossible;
-        # the node agent process must be restarted.
-        if self._inference_import_failed:
-            raise RuntimeError(
-                f"Petals/torch import is permanently broken in this process "
-                f"({self._inference_import_error}). "
-                "Please restart the beam-node-agent to recover."
-            )
-
-        async with self._model_lock:
-            if (
-                self._inference_model_id == model_id
-                and self._inference_model
-                and self._inference_tokenizer
-            ):
-                return self._inference_model, self._inference_tokenizer
-
-            loop = asyncio.get_running_loop()
-            model, tokenizer = await loop.run_in_executor(
-                None, self._load_model_sync, model_id
-            )
-            self._inference_model_id = model_id
-            self._inference_model = model
-            self._inference_tokenizer = tokenizer
-            return model, tokenizer
-
-    def _petals_python_sysconfig_paths(self) -> Dict[str, str]:
-        petals_python = os.environ.get("BEAM_PETALS_PYTHON")
-        if not petals_python:
-            return {}
-        try:
-            raw = subprocess.check_output(
-                [
-                    petals_python,
-                    "-c",
-                    (
-                        "import json, sysconfig; "
-                        "paths = sysconfig.get_paths(); "
-                        "print(json.dumps({k: paths.get(k, '') for k in "
-                        "('purelib', 'platlib', 'stdlib', 'platstdlib')}))"
-                    ),
-                ],
-                text=True,
-                timeout=10,
-            ).strip()
-        except Exception:
-            return {}
-        if not raw:
-            return {}
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            return {}
-        if not isinstance(parsed, dict):
-            return {}
-
-        normalized: Dict[str, str] = {}
-        for key, value in parsed.items():
-            if isinstance(value, str) and value.strip():
-                normalized[str(key)] = value.strip()
-        return normalized
-
-    @staticmethod
-    def _normalize_existing_paths(candidates: list[str]) -> list[str]:
-        normalized: list[str] = []
-        for path in candidates:
-            resolved = os.path.realpath(path)
-            if os.path.isdir(resolved) and resolved not in normalized:
-                normalized.append(resolved)
-        return normalized
-
-    def _petals_site_package_candidates(self) -> list[str]:
-        candidates: list[str] = []
-
-        site_pkgs_env = os.environ.get("BEAM_PETALS_SITE_PACKAGES")
-        if site_pkgs_env:
-            candidates.extend(
-                segment.strip()
-                for segment in site_pkgs_env.split(os.pathsep)
-                if segment.strip()
-            )
-
-        sysconfig_paths = self._petals_python_sysconfig_paths()
-        for key in ("purelib", "platlib"):
-            path = sysconfig_paths.get(key)
-            if path:
-                candidates.append(path)
-
-        return self._normalize_existing_paths(candidates)
-
-    def _petals_stdlib_candidates(self) -> list[str]:
-        candidates: list[str] = []
-
-        sysconfig_paths = self._petals_python_sysconfig_paths()
-        for key in ("stdlib", "platstdlib"):
-            path = sysconfig_paths.get(key)
-            if path:
-                candidates.append(path)
-
-        expanded: list[str] = []
-        for path in candidates:
-            expanded.append(path)
-            lib_dynload = os.path.join(path, "lib-dynload")
-            if os.path.isdir(lib_dynload):
-                expanded.append(lib_dynload)
-
-        return self._normalize_existing_paths(expanded)
-
-    def _prepare_inference_imports(self) -> None:
-        # ------------------------------------------------------------------ #
-        # PRE-LOAD critical stdlib C-extension modules BEFORE any sys.path    #
-        # manipulation.  In a PyInstaller binary the normal built-in/frozen   #
-        # importer resolves these via the embedded archive; once sys.path is  #
-        # rewritten to point at the petals venv's lib-dynload the file-system #
-        # importer takes over and may not find them (e.g. 'cmath', 'math').   #
-        # Caching them in sys.modules first avoids the ModuleNotFoundError    #
-        # that otherwise surfaces deep inside torch/testing/_comparison.py.   #
-        # ------------------------------------------------------------------ #
-        _stdlib_preload = (
-            "cmath", "math", "statistics", "fractions", "decimal",
-            "unicodedata", "_decimal", "_json", "json", "struct", "_struct",
-            "array", "select", "ssl", "socket", "_socket", "binascii",
-            "_codecs", "codecs", "io", "_io", "abc",
-        )
-        for _mod_name in _stdlib_preload:
-            if _mod_name not in sys.modules:
-                try:
-                    __import__(_mod_name)
-                    log.debug("Pre-loaded stdlib module: %s", _mod_name)
-                except ImportError:
-                    log.debug("Stdlib module not available for pre-load: %s", _mod_name)
-
-        petals_paths = self._petals_site_package_candidates()
-        stdlib_paths = self._petals_stdlib_candidates()
-        inference_paths = petals_paths + stdlib_paths
-
-        if inference_paths:
-            # Ensure the Petals runtime paths win import resolution.
-            for path in reversed(inference_paths):
-                if path in sys.path:
-                    sys.path.remove(path)
-                sys.path.insert(0, path)
-
-        # Guard against accidental ".../numpy" entries which trigger numpy source-tree errors.
-        cleaned_path: list[str] = []
-        removed: list[str] = []
-        for entry in sys.path:
-            resolved = os.path.realpath(entry) if entry else entry
-            if resolved and os.path.basename(resolved.rstrip(os.sep)) == "numpy":
-                removed.append(entry)
-                continue
-            cleaned_path.append(entry)
-        if removed:
-            log.warning("Removed suspicious sys.path entries before inference import: %s", removed)
-        sys.path[:] = cleaned_path
-
-        # Always evict core ML modules before inference imports to avoid partial-import residue.
-        for root_name in (
-            "numpy",
-            "torch",
-            "petals",
-            "hivemind",
-            "transformers",
-            "accelerate",
-            "huggingface_hub",
-            "tokenizers",
-            "pydantic",
-            "pydantic_core",
-            "annotated_types",
-        ):
-            for loaded_name in list(sys.modules):
-                if loaded_name == root_name or loaded_name.startswith(f"{root_name}."):
-                    sys.modules.pop(loaded_name, None)
-
-    def _load_model_sync(self, model_id: str):
-        self._prepare_inference_imports()
-
-        try:
-            import numpy as _numpy
-        except Exception as exc:
-            raise RuntimeError(
-                "failed to import numpy from the Petals runtime; "
-                f"BEAM_PETALS_SITE_PACKAGES={os.environ.get('BEAM_PETALS_SITE_PACKAGES', '')}"
-            ) from exc
-
-        log.info("Inference runtime numpy: %s (%s)", _numpy.__version__, getattr(_numpy, "__file__", "unknown"))
-
-        try:
-            from petals import AutoDistributedModelForCausalLM
-            from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
-            from transformers import AutoTokenizer
-            import torch
-        except Exception as exc:
-            # Detect C-extension corruption that cannot be recovered in this process.
-            # Symptoms:
-            #   - "already has a docstring" – torch._C was partially initialised and
-            #     cannot be re-imported after a previous failed attempt.
-            #   - "No module named 'cmath'" – a stdlib C-extension was not pre-cached
-            #     and is now unreachable through the rewritten sys.path.
-            # In both cases, every subsequent import attempt in this process will
-            # fail with the same (or a derived) error.  Mark the flag so that
-            # _get_inference_model short-circuits further jobs and reports a clear
-            # restart message instead of spamming identical tracebacks.
-            exc_str = str(exc)
-            is_permanent = (
-                "already has a docstring" in exc_str
-                or "No module named 'cmath'" in exc_str
-                or "ModuleNotFoundError" in type(exc).__name__
-            )
-            if is_permanent:
-                self._inference_import_failed = True
-                self._inference_import_error = exc_str
-                log.error(
-                    "Petals/torch C-extension import is permanently broken in this "
-                    "process.  Root cause: %s.  "
-                    "The node agent process must be restarted to recover.",
-                    exc_str,
-                )
-            raise RuntimeError(
-                "failed to import Petals runtime dependencies in node agent process"
-            ) from exc
-
-        tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
-        if tokenizer.pad_token is None and tokenizer.eos_token:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        log.info(f"Loading Distributed Model: {model_id}...")
-        model = AutoDistributedModelForCausalLM.from_pretrained(
-            model_id,
-            initial_peers=PUBLIC_INITIAL_PEERS,
-            torch_dtype=DTYPE_MAP.get("float16", torch.float16),
-        )
-        log.info(f"Model {model_id} loaded successfully.")
-        model.eval()
-        return model, tokenizer
+                tb = msg.get("traceback", "")
+                if tb:
+                    log.error("InferenceWorker traceback:\n%s", tb)
+                raise Exception(msg.get("message", "inference error"))
 
     def _format_messages(self, messages: list) -> str:
         lines = []
@@ -1101,10 +1156,11 @@ class NodeAgent:
                 self._petals_check_task = asyncio.create_task(
                     self._check_petals_liveness(new_mid, range_str)
                 )
-            if self._inference_model_id and self._inference_model_id != new_mid:
-                self._inference_model_id = None
-                self._inference_model = None
-                self._inference_tokenizer = None
+            # Stop the inference worker subprocess so it reloads the new model.
+            if self._inference_worker is not None:
+                log.info("Assignment changed — stopping inference worker subprocess.")
+                self._inference_worker.stop()
+                self._inference_worker = None
 
     async def _check_petals_liveness(self, model_id: str, block_range: str) -> None:
         try:
