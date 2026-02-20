@@ -46,6 +46,10 @@ class NodeAgent:
         self._inference_model: Optional[object] = None
         self._inference_tokenizer: Optional[object] = None
         self._petals_check_task: Optional[asyncio.Task] = None
+        # Set to True when a torch/petals C-extension import corruption is detected.
+        # Once corrupted, the process must be restarted; we short-circuit further attempts.
+        self._inference_import_failed: bool = False
+        self._inference_import_error: Optional[str] = None
 
     async def start(self):
         log.info("Starting Beam Node Agent...")
@@ -600,6 +604,16 @@ class NodeAgent:
                 raise Exception(value)
 
     async def _get_inference_model(self, model_id: str):
+        # Short-circuit immediately if a prior attempt corrupted torch C-extensions.
+        # Re-importing torch in the same process after this failure is impossible;
+        # the node agent process must be restarted.
+        if self._inference_import_failed:
+            raise RuntimeError(
+                f"Petals/torch import is permanently broken in this process "
+                f"({self._inference_import_error}). "
+                "Please restart the beam-node-agent to recover."
+            )
+
         async with self._model_lock:
             if (
                 self._inference_model_id == model_id
@@ -700,6 +714,29 @@ class NodeAgent:
         return self._normalize_existing_paths(expanded)
 
     def _prepare_inference_imports(self) -> None:
+        # ------------------------------------------------------------------ #
+        # PRE-LOAD critical stdlib C-extension modules BEFORE any sys.path    #
+        # manipulation.  In a PyInstaller binary the normal built-in/frozen   #
+        # importer resolves these via the embedded archive; once sys.path is  #
+        # rewritten to point at the petals venv's lib-dynload the file-system #
+        # importer takes over and may not find them (e.g. 'cmath', 'math').   #
+        # Caching them in sys.modules first avoids the ModuleNotFoundError    #
+        # that otherwise surfaces deep inside torch/testing/_comparison.py.   #
+        # ------------------------------------------------------------------ #
+        _stdlib_preload = (
+            "cmath", "math", "statistics", "fractions", "decimal",
+            "unicodedata", "_decimal", "_json", "json", "struct", "_struct",
+            "array", "select", "ssl", "socket", "_socket", "binascii",
+            "_codecs", "codecs", "io", "_io", "abc",
+        )
+        for _mod_name in _stdlib_preload:
+            if _mod_name not in sys.modules:
+                try:
+                    __import__(_mod_name)
+                    log.debug("Pre-loaded stdlib module: %s", _mod_name)
+                except ImportError:
+                    log.debug("Stdlib module not available for pre-load: %s", _mod_name)
+
         petals_paths = self._petals_site_package_candidates()
         stdlib_paths = self._petals_stdlib_candidates()
         inference_paths = petals_paths + stdlib_paths
@@ -761,6 +798,31 @@ class NodeAgent:
             from transformers import AutoTokenizer
             import torch
         except Exception as exc:
+            # Detect C-extension corruption that cannot be recovered in this process.
+            # Symptoms:
+            #   - "already has a docstring" – torch._C was partially initialised and
+            #     cannot be re-imported after a previous failed attempt.
+            #   - "No module named 'cmath'" – a stdlib C-extension was not pre-cached
+            #     and is now unreachable through the rewritten sys.path.
+            # In both cases, every subsequent import attempt in this process will
+            # fail with the same (or a derived) error.  Mark the flag so that
+            # _get_inference_model short-circuits further jobs and reports a clear
+            # restart message instead of spamming identical tracebacks.
+            exc_str = str(exc)
+            is_permanent = (
+                "already has a docstring" in exc_str
+                or "No module named 'cmath'" in exc_str
+                or "ModuleNotFoundError" in type(exc).__name__
+            )
+            if is_permanent:
+                self._inference_import_failed = True
+                self._inference_import_error = exc_str
+                log.error(
+                    "Petals/torch C-extension import is permanently broken in this "
+                    "process.  Root cause: %s.  "
+                    "The node agent process must be restarted to recover.",
+                    exc_str,
+                )
             raise RuntimeError(
                 "failed to import Petals runtime dependencies in node agent process"
             ) from exc
