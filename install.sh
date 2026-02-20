@@ -40,45 +40,25 @@ case "$os" in
     ;;
 esac
 
-archive_name="${asset_name}.tar.gz"
-archive_path="./$archive_name"
-download_url="$release_base/$archive_name"
+binary_path="./$asset_name"
+download_url="$release_base/$asset_name"
 
-if [[ -f "$archive_path" ]]; then
+if [[ -f "$binary_path" ]]; then
   if [[ "${BEAM_ACCEPT_DEFAULTS:-}" == "true" ]]; then
     redownload="N"
   else
-    read -r -p "$archive_path exists. Redownload? [y/N]: " redownload < /dev/tty || redownload="N"
+    read -r -p "$binary_path exists. Redownload? [y/N]: " redownload < /dev/tty || redownload="N"
   fi
   redownload=${redownload:-N}
   if [[ "$redownload" =~ ^[Yy]$ ]]; then
-    curl -fL "$download_url" -o "$archive_path"
-    echo "Downloaded $archive_path"
+    curl -fL "$download_url" -o "$binary_path"
+    echo "Downloaded $binary_path"
   else
-    echo "Using existing $archive_path"
+    echo "Using existing $binary_path"
   fi
 else
-  curl -fL "$download_url" -o "$archive_path"
-  echo "Downloaded $archive_path"
-fi
-
-extract_dir="./${asset_name}_extracted"
-rm -rf "$extract_dir"
-mkdir -p "$extract_dir"
-tar -xzf "$archive_path" -C "$extract_dir"
-
-if [[ -f "$extract_dir/$asset_name" ]]; then
-  binary_path="$extract_dir/$asset_name"
-elif [[ -f "$extract_dir/$asset_name/$asset_name" ]]; then
-  binary_path="$extract_dir/$asset_name/$asset_name"
-else
-  found_binary="$(find "$extract_dir" -type f -name "$asset_name" | head -n 1)"
-  if [[ -n "$found_binary" ]]; then
-    binary_path="$found_binary"
-  else
-    echo "Failed to locate $asset_name inside extracted archive."
-    exit 1
-  fi
+  curl -fL "$download_url" -o "$binary_path"
+  echo "Downloaded $binary_path"
 fi
 
 chmod +x "$binary_path"
