@@ -47,6 +47,25 @@ def _emit(obj):
     sys.stdout.flush()
 
 
+def _load_model(model_id, peers, dtype_map, float16):
+    """Load the distributed model and tokenizer, return (model, tokenizer)."""
+    from petals import AutoDistributedModelForCausalLM
+    from transformers import AutoTokenizer
+    import torch
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
+    if tokenizer.pad_token is None and tokenizer.eos_token:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoDistributedModelForCausalLM.from_pretrained(
+        model_id,
+        initial_peers=peers,
+        torch_dtype=dtype_map.get("float16", float16),
+    )
+    model.eval()
+    return model, tokenizer
+
+
 def main():
     model = None
     tokenizer = None
@@ -63,7 +82,24 @@ def main():
     # Maximum seconds to wait for the first token before aborting.
     _inference_timeout = int(os.environ.get("BEAM_INFERENCE_TIMEOUT", "120"))
 
+    # Pre-warm: if BEAM_INFERENCE_WARMUP_MODEL is set, load the model immediately
+    # so the first user request doesn't have to wait for disk I/O.
+    _warmup_model_id = os.environ.get("BEAM_INFERENCE_WARMUP_MODEL", "")
+
     _emit({"type": "ready"})
+
+    if _warmup_model_id:
+        try:
+            from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
+            import torch
+            peers = _initial_peers if _initial_peers else PUBLIC_INITIAL_PEERS
+            model, tokenizer = _load_model(_warmup_model_id, peers, DTYPE_MAP, torch.float16)
+            current_model_id = _warmup_model_id
+            _emit({"type": "warmup_done", "model_id": _warmup_model_id})
+        except Exception as exc:
+            import traceback as _tb
+            _emit({"type": "warmup_error", "model_id": _warmup_model_id,
+                   "message": str(exc), "traceback": _tb.format_exc()})
 
     for raw in sys.stdin:
         raw = raw.strip()
@@ -83,22 +119,10 @@ def main():
 
         try:
             if model is None or current_model_id != model_id:
-                from petals import AutoDistributedModelForCausalLM
                 from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
-                from transformers import AutoTokenizer
                 import torch
-
-                tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
-                if tokenizer.pad_token is None and tokenizer.eos_token:
-                    tokenizer.pad_token = tokenizer.eos_token
-
                 peers = _initial_peers if _initial_peers else PUBLIC_INITIAL_PEERS
-                model = AutoDistributedModelForCausalLM.from_pretrained(
-                    model_id,
-                    initial_peers=peers,
-                    torch_dtype=DTYPE_MAP.get("float16", torch.float16),
-                )
-                model.eval()
+                model, tokenizer = _load_model(model_id, peers, DTYPE_MAP, torch.float16)
                 current_model_id = model_id
 
             from transformers import TextIteratorStreamer
@@ -323,8 +347,16 @@ class _InferenceSubprocess:
                 except Exception:
                     log.warning("InferenceWorker non-JSON output: %s", line)
                     continue
+                mtype = msg.get("type")
+                # Absorb warm-up notifications silently (they are not job results).
+                if mtype == "warmup_done":
+                    log.info("InferenceWorker warmup complete: model=%s", msg.get("model_id"))
+                    continue
+                if mtype == "warmup_error":
+                    log.warning("InferenceWorker warmup error: %s", msg.get("message"))
+                    continue
                 yield msg
-                if msg.get("type") in ("done", "error"):
+                if mtype in ("done", "error"):
                     break
 
 
@@ -798,8 +830,10 @@ class NodeAgent:
             )
             return
 
+        log.info("Starting inference: job_id=%s model_id=%s", job_id, model_id)
         async with self._inference_lock:
             try:
+                token_count = 0
                 async for token in self._run_inference(
                     job_id=job_id,
                     model_id=model_id,
@@ -807,9 +841,14 @@ class NodeAgent:
                     max_tokens=max_tokens,
                     temperature=temperature,
                 ):
+                    token_count += 1
                     await self._send_ws(
                         ws, {"type": "token", "job_id": job_id, "token": token}
                     )
+                log.info(
+                    "Inference done: job_id=%s tokens_sent=%d ws_closed=%s",
+                    job_id, token_count, ws.closed,
+                )
                 await self._send_ws(
                     ws,
                     {"type": "done", "job_id": job_id, "finish_reason": "stop"},
@@ -891,6 +930,14 @@ class NodeAgent:
                     "No beam DHT peers in assignment — inference worker will use "
                     "PUBLIC_INITIAL_PEERS (public Petals swarm)"
                 )
+
+            # Pre-warm: instruct the worker to load the model immediately at startup
+            # so the first real inference request doesn't have to wait for disk I/O.
+            if self.current_assignment:
+                warmup_model = self.current_assignment.get("model_id", "")
+                if warmup_model:
+                    extra_env["BEAM_INFERENCE_WARMUP_MODEL"] = warmup_model
+                    log.info("Inference worker will pre-load model '%s' at startup.", warmup_model)
 
             self._inference_worker = _InferenceSubprocess(
                 petals_python, script_path, extra_env=extra_env
@@ -1228,11 +1275,42 @@ class NodeAgent:
                 self._petals_check_task = asyncio.create_task(
                     self._check_petals_liveness(new_mid, range_str)
                 )
+                # Pre-warm the inference worker once petals is ready.
+                asyncio.create_task(self._prewarm_inference_worker())
             # Stop the inference worker subprocess so it reloads the new model.
             if self._inference_worker is not None:
                 log.info("Assignment changed — stopping inference worker subprocess.")
                 self._inference_worker.stop()
                 self._inference_worker = None
+
+    async def _prewarm_inference_worker(self) -> None:
+        """
+        Wait until the petals server is running, then pre-start the inference worker
+        so that the model is loaded from disk/cache before the first user request arrives.
+        This eliminates the 30-60 second 'cold start' delay users would otherwise experience.
+        """
+        try:
+            # Poll until petals is running (max 5 minutes).
+            for _ in range(300):
+                if self.petals.is_running():
+                    break
+                await asyncio.sleep(1)
+            else:
+                log.warning("Pre-warm: petals server did not become ready within 5 minutes.")
+                return
+
+            if self.config.agent.mock_inference:
+                return
+
+            log.info("Pre-warming inference worker (petals server is ready).")
+            loop = asyncio.get_running_loop()
+            # Run worker creation in a thread so it doesn't block the event loop.
+            await loop.run_in_executor(None, self._ensure_inference_worker)
+            log.info("Inference worker pre-warm complete — model is loading in the background.")
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            log.warning("Inference worker pre-warm failed: %s", exc)
 
     async def _check_petals_liveness(self, model_id: str, block_range: str) -> None:
         try:
