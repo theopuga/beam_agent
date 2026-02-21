@@ -46,11 +46,19 @@ def _emit(obj):
     sys.stdout.flush()
 
 
-def _load_model(model_id, peers, dtype_map, float16):
+def _load_model(model_id, peers, _dtype_map=None, _float16=None):
     # Load the distributed model and tokenizer; returns (model, tokenizer).
+    #
+    # NOTE: Do NOT pass torch_dtype=float16 here.
+    # The client model (AutoDistributedModelForCausalLM) runs the embedding
+    # layer and final ln_f on CPU in float32.  The remote transformer blocks
+    # run on the GPU server in float16 — that is controlled separately by the
+    # Petals server, not by this from_pretrained() call.
+    # Forcing float16 here causes:
+    #   RuntimeError: "LayerNormKernelImpl" not implemented for 'Half'
+    # because PyTorch's CPU LayerNorm kernel does not support float16.
     from petals import AutoDistributedModelForCausalLM
     from transformers import AutoTokenizer
-    import torch
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
     if tokenizer.pad_token is None and tokenizer.eos_token:
@@ -59,7 +67,6 @@ def _load_model(model_id, peers, dtype_map, float16):
     model = AutoDistributedModelForCausalLM.from_pretrained(
         model_id,
         initial_peers=peers,
-        torch_dtype=dtype_map.get("float16", float16),
     )
     model.eval()
     return model, tokenizer
@@ -89,10 +96,9 @@ def main():
 
     if _warmup_model_id:
         try:
-            from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
-            import torch
+            from petals.constants import PUBLIC_INITIAL_PEERS
             peers = _initial_peers if _initial_peers else PUBLIC_INITIAL_PEERS
-            model, tokenizer = _load_model(_warmup_model_id, peers, DTYPE_MAP, torch.float16)
+            model, tokenizer = _load_model(_warmup_model_id, peers)
             current_model_id = _warmup_model_id
             _emit({"type": "warmup_done", "model_id": _warmup_model_id})
         except Exception as exc:
@@ -118,10 +124,9 @@ def main():
 
         try:
             if model is None or current_model_id != model_id:
-                from petals.constants import DTYPE_MAP, PUBLIC_INITIAL_PEERS
-                import torch
+                from petals.constants import PUBLIC_INITIAL_PEERS
                 peers = _initial_peers if _initial_peers else PUBLIC_INITIAL_PEERS
-                model, tokenizer = _load_model(model_id, peers, DTYPE_MAP, torch.float16)
+                model, tokenizer = _load_model(model_id, peers, None, None)
                 current_model_id = model_id
 
             import torch
