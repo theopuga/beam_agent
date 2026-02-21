@@ -38,7 +38,6 @@ _INFERENCE_WORKER_SCRIPT = r"""
 import json
 import os
 import sys
-import threading
 import time
 
 
@@ -125,52 +124,37 @@ def main():
                 model, tokenizer = _load_model(model_id, peers, DTYPE_MAP, torch.float16)
                 current_model_id = model_id
 
-            from transformers import TextIteratorStreamer
+            import torch
 
             inputs = tokenizer(prompt, return_tensors="pt")
-            try:
-                inputs = inputs.to(model.device)
-            except Exception:
-                pass
+            input_ids = inputs["input_ids"]
 
-            streamer = TextIteratorStreamer(
-                tokenizer, skip_prompt=True, skip_special_tokens=True
-            )
             gen_kwargs = dict(
-                **inputs,
+                input_ids=input_ids,
                 max_new_tokens=max_new_tokens,
                 do_sample=do_sample,
-                streamer=streamer,
             )
             if do_sample:
                 gen_kwargs["temperature"] = temperature
 
-            gen_error = []
+            # Run generation synchronously.
+            # NOTE: TextIteratorStreamer does not work reliably with
+            # AutoDistributedModelForCausalLM because the distributed
+            # generate() implementation does not call streamer.put() per token.
+            with torch.no_grad():
+                output_ids = model.generate(**gen_kwargs)
 
-            def _gen():
-                try:
-                    model.generate(**gen_kwargs)
-                except Exception as exc:
-                    gen_error.append(exc)
+            # Decode only the newly generated tokens (skip the prompt).
+            new_ids = output_ids[0, input_ids.shape[-1]:]
+            text = tokenizer.decode(new_ids, skip_special_tokens=True)
 
-            t = threading.Thread(target=_gen, daemon=True)
-            t.start()
+            # Emit one chunk at a time so the frontend streams word-by-word.
+            words = text.split(" ")
+            for i, word in enumerate(words):
+                chunk = word if i == 0 else " " + word
+                if chunk:
+                    _emit({"type": "token", "job_id": job_id, "token": chunk})
 
-            deadline = time.monotonic() + _inference_timeout
-            got_first_token = False
-            for token in streamer:
-                if not got_first_token:
-                    got_first_token = True
-                if time.monotonic() > deadline:
-                    raise TimeoutError(
-                        f"Inference timed out after {_inference_timeout}s. "
-                        "The model swarm may not have all blocks online."
-                    )
-                _emit({"type": "token", "job_id": job_id, "token": token})
-
-            t.join(timeout=5)
-            if gen_error:
-                raise gen_error[0]
             _emit({"type": "done", "job_id": job_id})
 
         except Exception as exc:
