@@ -48,7 +48,7 @@ def _emit(obj):
 
 
 def _load_model(model_id, peers, dtype_map, float16):
-    """Load the distributed model and tokenizer, return (model, tokenizer)."""
+    # Load the distributed model and tokenizer; returns (model, tokenizer).
     from petals import AutoDistributedModelForCausalLM
     from transformers import AutoTokenizer
     import torch
