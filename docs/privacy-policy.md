@@ -126,7 +126,7 @@ Depending on your jurisdiction, you may have the right to:
 - Opt out of certain data processing activities
 - Withdraw consent where processing is based on consent
 
-To exercise these rights, contact us at privacy@openbeam.me.
+To exercise these rights, contact us at beamopennode@gmail.com.
 
 ---
 
@@ -158,5 +158,5 @@ We may update this Privacy Policy from time to time. We will notify you of mater
 
 If you have questions about this Privacy Policy, contact us at:
 
-- **Email**: privacy@openbeam.me
+- **Email**: beamopennode@gmail.com
 - **Twitter / X**: [@Beam_open_node](https://x.com/Beam_open_node)
