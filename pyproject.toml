@@ -9,12 +9,8 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
-[project.optional-dependencies]
-tui = ["textual>=0.70"]
-
 [project.scripts]
-beam-node-agent     = "beam_node_agent.main:main"
-beam-node-agent-tui = "beam_node_agent.tui.app:main"
+beam-node-agent = "beam_node_agent.main:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

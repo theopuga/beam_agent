@@ -16,24 +16,7 @@ def main():
     parser.add_argument(
         "--config", default="config.yaml", help="Path to configuration file"
     )
-    parser.add_argument(
-        "--tui",
-        action="store_true",
-        help="Launch the terminal UI (requires textual: pip install beam-node-agent[tui])",
-    )
     args = parser.parse_args()
-
-    if args.tui:
-        try:
-            from beam_node_agent.tui.app import BeamTuiApp
-        except ImportError:
-            print(
-                "The TUI requires the 'textual' package.\n"
-                "Install it with:  pip install beam-node-agent[tui]"
-            )
-            return
-        BeamTuiApp(config_path=args.config).run()
-        return
 
     # Setup Logging
     logging.basicConfig(
