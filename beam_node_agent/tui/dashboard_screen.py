@@ -401,5 +401,13 @@ class DashboardScreen(Screen):
 # Build the agent command to run
 # ---------------------------------------------------------------------------
 def _build_agent_cmd(config_path: str) -> list[str]:
-    """Return the command list to launch the agent (same Python interpreter)."""
+    """Return the command list to launch the agent.
+
+    When BEAM_AGENT_BIN is set (e.g. by install.sh for the pre-built binary),
+    that binary is used directly.  Otherwise the agent is run from the current
+    Python interpreter (source / editable install).
+    """
+    binary = os.environ.get("BEAM_AGENT_BIN", "").strip()
+    if binary:
+        return [binary, "--config", config_path]
     return [sys.executable, "-m", "beam_node_agent.main", "--config", config_path]

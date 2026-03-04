@@ -81,6 +81,17 @@ if [[ "${BEAM_RUN_FROM_SOURCE:-false}" == "true" ]]; then
     echo "Using existing agent venv at $agent_venv"
   fi
 
+  # Install TUI dependency (textual) into the agent venv
+  _tui_ok=false
+  if "${BEAM_SKIP_TUI:-false}" != "true"; then
+    if "$agent_venv/bin/pip" install --quiet "textual>=0.70" 2>/dev/null; then
+      _tui_ok=true
+      echo "TUI (textual) installed in agent venv."
+    else
+      echo "Could not install textual; agent will start without TUI."
+    fi
+  fi
+
   # Assemble start_agent.sh (source-based variant)
   {
     echo '#!/usr/bin/env bash'
@@ -92,7 +103,11 @@ if [[ "${BEAM_RUN_FROM_SOURCE:-false}" == "true" ]]; then
     [[ -n "${BEAM_SINGLE_NODE:-}" ]] && echo "export BEAM_SINGLE_NODE=\"${BEAM_SINGLE_NODE}\""
     [[ -n "${BEAM_MAX_BLOCKS:-}" ]] && echo "export BEAM_MAX_BLOCKS=\"${BEAM_MAX_BLOCKS}\""
     echo "cd \"$(realpath "$source_dir")\""
-    echo "exec \"$(realpath "$agent_venv")/bin/python\" -m beam_node_agent.main --config \"$(realpath "$config_path")\""
+    if [[ "$_tui_ok" == "true" ]]; then
+      echo "exec \"$(realpath "$agent_venv")/bin/python\" -m beam_node_agent.main --tui --config \"$(realpath "$config_path")\""
+    else
+      echo "exec \"$(realpath "$agent_venv")/bin/python\" -m beam_node_agent.main --config \"$(realpath "$config_path")\""
+    fi
   } > start_agent.sh
   chmod +x start_agent.sh
 
@@ -876,15 +891,51 @@ if [[ "${BEAM_SINGLE_NODE:-}" == "true" ]]; then
   echo "Single-node mode enabled. BEAM_HOP_COUNTS set to $BEAM_HOP_COUNTS and BEAM_MAX_BLOCKS to $BEAM_MAX_BLOCKS"
 fi
 
+# ---------------------------------------------------------------------------
+# Try to set up the terminal UI (textual).  Falls back to plain binary mode
+# if Python3 is unavailable or textual fails to install.
+# ---------------------------------------------------------------------------
+_tui_python=""
+if [[ "${BEAM_SKIP_TUI:-false}" != "true" ]] && command -v python3 >/dev/null 2>&1; then
+  _tui_venv="${BEAM_TUI_VENV_DIR:-./beam-tui-venv}"
+  if [[ ! -d "$_tui_venv" ]]; then
+    echo "Setting up TUI environment in $_tui_venv …"
+    if python3 -m venv "$_tui_venv" \
+        && "$_tui_venv/bin/pip" install --quiet --upgrade pip \
+        && "$_tui_venv/bin/pip" install --quiet "textual>=0.70" aiohttp pyyaml "pydantic>=2.0" \
+        && "$_tui_venv/bin/pip" install --quiet --no-deps \
+             "git+https://github.com/beam-open-node/beam_agent.git"; then
+      echo "TUI environment ready."
+    else
+      echo "TUI setup failed; agent will start without TUI."
+      rm -rf "$_tui_venv"
+    fi
+  fi
+  if [[ -d "$_tui_venv" ]]; then
+    if "$_tui_venv/bin/python" -c "import textual; import beam_node_agent.tui" 2>/dev/null; then
+      _tui_python="$(realpath "$_tui_venv")/bin/python"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Generate start_agent.sh
+# ---------------------------------------------------------------------------
 {
   echo '#!/usr/bin/env bash'
+  echo 'set -euo pipefail'
   [[ -n "${BEAM_PETALS_PYTHON:-}" ]] && echo "export BEAM_PETALS_PYTHON=\"${BEAM_PETALS_PYTHON}\""
   echo "export BEAM_CONTROL_PLANE_URL=\"$control_plane_url\""
   echo "export CONTROL_PLANE_URL=\"$control_plane_url\""
   [[ -n "${BEAM_HOP_COUNTS:-}" ]] && echo "export BEAM_HOP_COUNTS=\"${BEAM_HOP_COUNTS}\""
   [[ -n "${BEAM_SINGLE_NODE:-}" ]] && echo "export BEAM_SINGLE_NODE=\"${BEAM_SINGLE_NODE}\""
   [[ -n "${BEAM_MAX_BLOCKS:-}" ]] && echo "export BEAM_MAX_BLOCKS=\"${BEAM_MAX_BLOCKS}\""
-  echo "exec \"$binary_path\" --config \"$config_path\""
+  if [[ -n "$_tui_python" ]]; then
+    echo "export BEAM_AGENT_BIN=\"$(realpath "$binary_path")\""
+    echo "exec \"$_tui_python\" -m beam_node_agent.tui.app --config \"$(realpath "$config_path")\""
+  else
+    echo "exec \"$(realpath "$binary_path")\" --config \"$(realpath "$config_path")\""
+  fi
 } > start_agent.sh
 chmod +x start_agent.sh
 

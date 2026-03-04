@@ -66,8 +66,27 @@ class BeamTuiApp(App):
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
-def main(config_path: str = _DEFAULT_CONFIG) -> None:
-    BeamTuiApp(config_path=config_path).run()
+def main() -> None:
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(description="Beam Node Agent TUI")
+    parser.add_argument(
+        "--config",
+        default=os.environ.get("BEAM_CONFIG_PATH", _DEFAULT_CONFIG),
+        help="Path to config.yaml",
+    )
+    parser.add_argument(
+        "--agent-bin",
+        default=os.environ.get("BEAM_AGENT_BIN", ""),
+        help="Path to the pre-built agent binary (sets BEAM_AGENT_BIN if given)",
+    )
+    args = parser.parse_args()
+
+    if args.agent_bin:
+        os.environ["BEAM_AGENT_BIN"] = args.agent_bin
+
+    BeamTuiApp(config_path=args.config).run()
 
 
 if __name__ == "__main__":
