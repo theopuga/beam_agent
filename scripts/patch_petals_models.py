@@ -31,59 +31,94 @@ BLOCK_TEMPLATE = textwrap.dedent("""\
 from typing import Optional, Tuple
 import torch
 from transformers.cache_utils import DynamicCache
-try:
-    from transformers.modeling_attn_mask_utils import (
-        _prepare_4d_causal_attention_mask,
-        _prepare_4d_causal_attention_mask_for_sdpa,
-    )
-except ImportError:
-    _prepare_4d_causal_attention_mask = None
-    _prepare_4d_causal_attention_mask_for_sdpa = None
 
 {decoder_import}
 
 if _DecoderLayer is not None:
     class {block_class}(_DecoderLayer):
-        def __init__(self, config, layer_idx):
+        def __init__(self, config, layer_idx=0):
             super().__init__(config, layer_idx)
-            self._attn_implementation = getattr(config, "_attn_implementation", "eager")
+            # Ensure attn_implementation is set (Qwen3Config may leave it None)
+            self._attn_implementation = getattr(config, "_attn_implementation", "eager") or "eager"
+            if not getattr(config, "_attn_implementation", None):
+                config._attn_implementation = "eager"
             self.layer_idx = layer_idx
+            # Pre-compute RoPE for transformers>=5.x (position_embeddings required by attention)
+            self._beam_rope = None
+            try:
+                import importlib, inspect
+                mod = importlib.import_module(type(self).__mro__[1].__module__)
+                for name in dir(mod):
+                    if "rotary" in name.lower() and "embedding" in name.lower():
+                        cls = getattr(mod, name)
+                        if isinstance(cls, type):
+                            sig = inspect.signature(cls.__init__)
+                            if "config" in sig.parameters:
+                                self._beam_rope = cls(config=config)
+                            else:
+                                self._beam_rope = cls(
+                                    config.hidden_size // config.num_attention_heads,
+                                    config.max_position_embeddings,
+                                )
+                            break
+            except Exception:
+                pass
 
         def forward(self, hidden_states, *args, attention_mask=None, layer_past=None, use_cache=False, **kwargs):
             bs, sl, _ = hidden_states.shape
-            pkvl = 0; pkv = layer_past; sl_wp = sl
-            if pkv is not None:
-                pkvl = pkv[0].shape[2]; sl_wp = sl + pkvl
-                _pkv = self._rcfb(pkv, bs, pkvl)
-                pkv = DynamicCache()
-                pkv.key_cache = [torch.empty(0)] * self.layer_idx + [_pkv[0]]
-                pkv.value_cache = [torch.empty(0)] * self.layer_idx + [_pkv[1]]
-                pkv._seen_tokens = pkvl
-            if self._attn_implementation == "flash_attention_2":
-                attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-            elif self._attn_implementation == "sdpa" and _prepare_4d_causal_attention_mask_for_sdpa:
-                attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(attention_mask, (bs, sl), hidden_states, pkvl)
-            elif _prepare_4d_causal_attention_mask:
-                attention_mask = _prepare_4d_causal_attention_mask(attention_mask, (bs, sl), hidden_states, pkvl)
-            pos_ids = torch.arange(pkvl, sl + pkvl, dtype=torch.long, device=hidden_states.device).unsqueeze(0).view(-1, sl)
-            outputs = super().forward(hidden_states, *args, attention_mask=attention_mask, position_ids=pos_ids, past_key_value=pkv, use_cache=use_cache, **kwargs)
+            pkvl = 0
+            sl_wp = sl
+
+            # Always create a fresh DynamicCache; populate with past KV when available
+            pkv = DynamicCache()
+            if layer_past is not None:
+                # beam format: k=(bs*nkv, hd, pkvl), v=(bs*nkv, pkvl, hd)
+                pkvl = layer_past[0].shape[2]
+                sl_wp = sl + pkvl
+                k_m, v_m = self._rcfb(layer_past, bs, pkvl)
+                pkv.update(k_m, v_m, layer_idx=self.layer_idx)
+
+            pos_ids = torch.arange(pkvl, sl + pkvl, dtype=torch.long, device=hidden_states.device).unsqueeze(0)
+            if "position_embeddings" not in kwargs and self._beam_rope is not None:
+                kwargs["position_embeddings"] = self._beam_rope(hidden_states, pos_ids)
+
+            # transformers>=5.x: past_key_values (plural), DynamicCache updated in-place,
+            # returns tuple (hidden_states, [opt: attn_weights]) — no past_key_values in output
+            outputs = super().forward(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=pos_ids,
+                past_key_values=pkv,
+                use_cache=use_cache,
+                **kwargs
+            )
+            h = outputs[0]  # hidden_states is always first element
+
             if use_cache:
-                outputs = outputs[:-1] + (self._rctb(outputs[-1][self.layer_idx], bs, sl_wp),)
-            return outputs
+                # DynamicCache updated in-place; extract via key_cache/value_cache lists
+                k_out = pkv.key_cache[self.layer_idx]    # (bs, nkv, sl_wp, hd)
+                v_out = pkv.value_cache[self.layer_idx]  # (bs, nkv, sl_wp, hd)
+                beam_kv = self._rctb((k_out, v_out), bs, sl_wp)
+                return (h, beam_kv)
+            return (h,)
 
         def _rcfb(self, kv, bs, sl):
+            # beam format -> model format: k (bs*nkv, hd, sl) -> (bs, nkv, sl, hd)
             k, v = kv
-            nkv = getattr(self.self_attn, "num_key_value_heads", getattr(self.self_attn, "num_heads", 1))
-            hd = getattr(self.self_attn, "head_dim", k.shape[-1])
-            k = k.permute(0, 2, 1).view(bs, nkv, sl, hd); v = v.view(*k.shape)
-            return (k, v)
+            nkv = k.shape[0] // bs   # derived from tensor shape (avoids missing attr)
+            hd = k.shape[1]
+            k = k.permute(0, 2, 1).view(bs, nkv, sl, hd)
+            v = v.view(bs, nkv, sl, hd)
+            return k, v
 
         def _rctb(self, kv, bs, sl):
+            # model format (bs, nkv, sl, hd) -> beam format
             k, v = kv
-            nkv = getattr(self.self_attn, "num_key_value_heads", getattr(self.self_attn, "num_heads", 1))
-            hd = getattr(self.self_attn, "head_dim", k.shape[-1])
-            v = v.view(bs * nkv, sl, hd); k = k.view(*v.shape).permute(0, 2, 1)
-            return (k, v)
+            nkv = k.shape[1]   # derived from tensor shape
+            hd = k.shape[3]
+            k = k.view(bs * nkv, sl, hd).permute(0, 2, 1)
+            v = v.view(bs * nkv, sl, hd)
+            return k, v
 else:
     class {block_class}:
         def __init__(self, *a, **kw):
@@ -413,9 +448,59 @@ def patch_models_init(models_dir: pathlib.Path, model_pkgs: list):
         print("  models/__init__.py already up to date")
 
 
+def patch_convert_block(utils_dir: pathlib.Path):
+    """Patch convert_block.py to handle models without num_heads attribute (e.g. Qwen3)."""
+    cb_path = utils_dir / "convert_block.py"
+    if not cb_path.exists():
+        print("  convert_block.py not found; skipping")
+        return
+
+    text = cb_path.read_text()
+    old = "total_heads += submodule.num_heads"
+    new = (
+        "total_heads += getattr(submodule, 'num_heads', None) "
+        "or getattr(submodule, 'num_attention_heads', model_config.num_attention_heads)"
+    )
+    if old in text:
+        cb_path.write_text(text.replace(old, new, 1))
+        print("  convert_block.py patched (num_heads fallback)")
+    else:
+        print("  convert_block.py already patched or has different format")
+
+
+def patch_hivemind_grad_scaler(site_pkgs: pathlib.Path):
+    """Patch hivemind grad_scaler.py for torch>=2.5 compatibility."""
+    gs_path = site_pkgs / "hivemind" / "optim" / "grad_scaler.py"
+    if not gs_path.exists():
+        print("  hivemind grad_scaler.py not found; skipping")
+        return
+
+    text = gs_path.read_text()
+    old_import = "from torch.cuda.amp.grad_scaler import OptState, _refresh_per_optimizer_state"
+    new_import = (
+        "try:\n"
+        "    from torch.cuda.amp.grad_scaler import OptState, _refresh_per_optimizer_state\n"
+        "except ImportError:\n"
+        "    import enum\n"
+        "    class OptState(enum.Enum):\n"
+        "        READY = 0; UNSCALED = 1; STEPPED = 2\n"
+        "    def _refresh_per_optimizer_state():\n"
+        "        return {'stage': OptState.READY, 'found_inf_per_device': {}}"
+    )
+    if old_import in text:
+        gs_path.write_text(text.replace(old_import, new_import, 1))
+        print("  hivemind grad_scaler.py patched (torch>=2.5 compat)")
+    elif "except ImportError" in text and "OptState" in text:
+        print("  hivemind grad_scaler.py already patched")
+    else:
+        print("  hivemind grad_scaler.py: unexpected format, skipping")
+
+
 def main():
     print("Patching petals with frontier model support...")
     patch_auto_config(utils_dir)
+    patch_convert_block(utils_dir)
+    patch_hivemind_grad_scaler(site_pkgs)
 
     for spec in MODELS:
         patch_model(models_dir, spec)
