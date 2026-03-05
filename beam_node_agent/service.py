@@ -374,6 +374,7 @@ class NodeAgent:
         self._inference_lock = asyncio.Lock()
         self._model_lock = asyncio.Lock()  # kept for compatibility; no longer guards model loading
         self._petals_check_task: Optional[asyncio.Task] = None
+        self._petals_start_error: Optional[str] = None  # last error from petals.start()
         # Persistent inference worker subprocess (uses BEAM_PETALS_PYTHON)
         self._inference_worker: Optional[_InferenceSubprocess] = None
         self._inference_worker_script: Optional[str] = None
@@ -1172,6 +1173,7 @@ class NodeAgent:
                 "petals_uptime_sec": petals_info.get("uptime_sec"),
                 "petals_last_exit_code": petals_info.get("last_exit_code"),
                 "petals_last_exit_at": petals_info.get("last_exit_at"),
+                "petals_start_error": self._petals_start_error,
             },
             "active_jobs": [],
             "current_assignment": self.current_assignment or None,
@@ -1298,9 +1300,11 @@ class NodeAgent:
                 range_str = f"{new_range[0]}:{new_range[1]}"
                 log.info(f"Applying new assignment: model={new_mid}, range={range_str}")
                 self.petals.stop()
+                self._petals_start_error = None
                 try:
                     self.petals.start(new_mid, range_str, initial_peers=new_peers)
                 except Exception as e:
+                    self._petals_start_error = str(e)
                     log.error(f"Failed to start Petals for {new_mid} [{range_str}]: {e}")
                     return
 

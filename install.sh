@@ -320,6 +320,20 @@ PY
     "$numpy_spec" \
     "${petals_pip_args[@]}" \
     petals
+  if ! "$petals_venv/bin/python" -c "import petals" 2>/dev/null; then
+    echo "WARNING: petals is not importable after pip install — retrying without --no-build-isolation"
+    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
+      "$hf_hub_spec" \
+      "$transformers_spec" \
+      "$numpy_spec" \
+      petals
+    if ! "$petals_venv/bin/python" -c "import petals" 2>/dev/null; then
+      echo "ERROR: petals failed to install. Cannot start node with petals runtime."
+      echo "Check pip output above for errors. Try setting BEAM_PETALS_TORCH_SPEC or BEAM_PETALS_TRANSFORMERS_SPEC."
+      return 1
+    fi
+    echo "petals installed successfully (fallback succeeded)"
+  fi
   if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
     if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
       "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
@@ -545,8 +559,9 @@ models_dir = site_pkgs / "petals" / "models"
 utils_dir = site_pkgs / "petals" / "utils"
 
 if not models_dir.exists():
-    print("petals models dir not found; skipping model patches")
-    sys.exit(0)
+    print(f"ERROR: petals models dir not found at {models_dir}.")
+    print("petals may not be properly installed. Re-run install.sh.")
+    sys.exit(1)
 
 BLOCK_TEMPLATE = textwrap.dedent("""\
 from typing import Optional, Tuple

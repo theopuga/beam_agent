@@ -64,6 +64,24 @@ class PetalsWrapper:
         self._last_exit_time = int(time.time())
         log.warning("Petals process exited with code %s", exit_code)
 
+    def _check_petals_importable(self, python_exec: str) -> Optional[str]:
+        """Returns None if petals is importable from python_exec, or an error string."""
+        try:
+            result = subprocess.run(
+                [python_exec, "-c", "import petals"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                return stderr or f"exit code {result.returncode}"
+            return None
+        except subprocess.TimeoutExpired:
+            return None  # timed out checking — let the real process attempt anyway
+        except Exception as exc:
+            return str(exc)
+
     def start(self, model_id: str, block_range: str, initial_peers: Optional[list] = None):
         """
         Starts the Petals server subprocess.
@@ -79,6 +97,19 @@ class PetalsWrapper:
 
         # Basic CLI construction
         python_exec = os.environ.get("BEAM_PETALS_PYTHON") or sys.executable
+
+        # Pre-flight: verify petals is actually importable so we get a helpful error
+        # instead of the cryptic "No module named 'petals'" buried in subprocess stderr.
+        import_err = self._check_petals_importable(python_exec)
+        if import_err:
+            msg = (
+                f"Petals is not installed or not importable from '{python_exec}'. "
+                f"Error: {import_err}. "
+                f"Re-run install.sh (or set BEAM_PETALS_RECREATE_VENV=true) to "
+                f"reinstall the petals runtime."
+            )
+            log.error(msg)
+            raise RuntimeError(msg)
         cmd = [
             python_exec,
             "-m",

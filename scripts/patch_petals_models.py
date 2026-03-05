@@ -18,8 +18,9 @@ models_dir = site_pkgs / "petals" / "models"
 utils_dir = site_pkgs / "petals" / "utils"
 
 if not models_dir.exists():
-    print("petals models dir not found; skipping model patches")
-    sys.exit(0)
+    print(f"ERROR: petals models dir not found at {models_dir}.")
+    print("petals may not be properly installed. Re-run install.sh.")
+    sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Shared block/model template helpers
