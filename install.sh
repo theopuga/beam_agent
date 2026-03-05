@@ -991,10 +991,50 @@ def patch_hivemind_grad_scaler(site_pkgs):
         print("  hivemind grad_scaler.py: unexpected format, skipping")
 
 
+def patch_hivemind_p2pd(site_pkgs):
+    p2pd_path = site_pkgs / "hivemind" / "p2p" / "p2p_daemon.py"
+    if not p2pd_path.exists():
+        print("  hivemind p2p_daemon.py not found; skipping")
+        return
+    text = p2pd_path.read_text()
+    if "_make_abs_unix_maddr" in text:
+        print("  hivemind p2p_daemon.py already patched (Unix socket path fix)")
+        return
+    helper = (
+        "\n\ndef _make_abs_unix_maddr(socket_path: str):\n"
+        '    """Fix Unix socket multiaddr path: Multiaddr strips leading / causing Go to fail."""\n'
+        "    p_unix_varint = bytes([0x90, 0x03])\n"
+        "    path_bytes = socket_path.encode()\n"
+        "    length = len(path_bytes)\n"
+        "    if length < 0x80:\n"
+        "        len_bytes = bytes([length])\n"
+        "    else:\n"
+        "        result = []\n"
+        "        while length > 0x7f:\n"
+        "            result.append((length & 0x7f) | 0x80)\n"
+        "            length >>= 7\n"
+        "        result.append(length)\n"
+        "        len_bytes = bytes(result)\n"
+        "    from multiaddr import Multiaddr as _Multiaddr\n"
+        "    return _Multiaddr(p_unix_varint + len_bytes + path_bytes)\n"
+    )
+    insert_marker = "@dataclass(frozen=True)"
+    if insert_marker not in text:
+        print("  hivemind p2p_daemon.py: expected marker not found; skipping")
+        return
+    text = text.replace(insert_marker, helper + "\n\n" + insert_marker, 1)
+    old = 'self._client_listen_maddr = Multiaddr(cls._UNIX_SOCKET_PREFIX + f"p2pclient-{socket_uid}.sock")'
+    new = 'self._client_listen_maddr = _make_abs_unix_maddr(f"/tmp/hivemind-p2pclient-{socket_uid}.sock")'
+    text = text.replace(old, new)
+    p2pd_path.write_text(text)
+    print("  hivemind p2p_daemon.py patched (Unix socket absolute path fix)")
+
+
 print("Patching petals with frontier model support...")
 patch_auto_config(utils_dir)
 patch_convert_block(utils_dir)
 patch_hivemind_grad_scaler(site_pkgs)
+patch_hivemind_p2pd(site_pkgs)
 for spec in MODELS:
     patch_model(models_dir, spec)
 patch_models_init(models_dir, [m["pkg"] for m in MODELS])

@@ -468,6 +468,79 @@ def patch_convert_block(utils_dir: pathlib.Path):
         print("  convert_block.py already patched or has different format")
 
 
+def patch_hivemind_p2pd(site_pkgs: pathlib.Path):
+    """Fix Unix socket multiaddr path encoding bug in hivemind p2p_daemon.py.
+
+    Root cause: Python's Multiaddr('/unix/tmp/foo.sock').to_bytes() encodes the path
+    WITHOUT the leading '/', producing bytes for 'tmp/foo.sock' (relative path).
+    Go's manet.Dial then tries to connect to this relative path, fails silently, and
+    the stream handler never fires — causing all inference requests to hang.
+
+    Fix: construct multiaddr bytes manually so the path includes the leading '/'.
+    """
+    p2pd_path = site_pkgs / "hivemind" / "p2p" / "p2p_daemon.py"
+    if not p2pd_path.exists():
+        print("  hivemind p2p_daemon.py not found; skipping")
+        return
+
+    text = p2pd_path.read_text()
+
+    # Already patched?
+    if "_make_abs_unix_maddr" in text:
+        print("  hivemind p2p_daemon.py already patched (Unix socket path fix)")
+        return
+
+    # Insert the helper function before the P2PContext dataclass decorator
+    helper = (
+        "\n\ndef _make_abs_unix_maddr(socket_path: str):\n"
+        '    """Create a Unix socket multiaddr with absolute path correctly encoded in bytes.\n\n'
+        "    The standard Multiaddr('/unix/path') strips the leading '/' from the path bytes,\n"
+        "    causing Go's manet.Dial to try to connect to a relative path (fails silently).\n"
+        "    This function encodes the path WITH the leading '/' so Go can find the socket.\n"
+        '    """\n'
+        "    p_unix_varint = bytes([0x90, 0x03])  # P_UNIX = 400\n"
+        "    path_bytes = socket_path.encode()\n"
+        "    length = len(path_bytes)\n"
+        "    if length < 0x80:\n"
+        "        len_bytes = bytes([length])\n"
+        "    else:\n"
+        "        result = []\n"
+        "        while length > 0x7f:\n"
+        "            result.append((length & 0x7f) | 0x80)\n"
+        "            length >>= 7\n"
+        "        result.append(length)\n"
+        "        len_bytes = bytes(result)\n"
+        "    from multiaddr import Multiaddr as _Multiaddr\n"
+        "    return _Multiaddr(p_unix_varint + len_bytes + path_bytes)\n"
+    )
+
+    insert_marker = "@dataclass(frozen=True)"
+    if insert_marker not in text:
+        print("  hivemind p2p_daemon.py: expected marker not found; skipping")
+        return
+
+    text = text.replace(insert_marker, helper + "\n\n" + insert_marker, 1)
+
+    # Replace both occurrences of _client_listen_maddr using the old (broken) Multiaddr call.
+    # Pattern 1: in P2P.create()
+    old1 = 'self._client_listen_maddr = Multiaddr(cls._UNIX_SOCKET_PREFIX + f"p2pclient-{socket_uid}.sock")'
+    new1 = 'self._client_listen_maddr = _make_abs_unix_maddr(f"/tmp/hivemind-p2pclient-{socket_uid}.sock")'
+    if old1 in text:
+        text = text.replace(old1, new1, 1)
+    else:
+        print("  WARNING: first _client_listen_maddr pattern not found; skipping that replacement")
+
+    # Pattern 2: in P2P.replicate()
+    old2 = 'self._client_listen_maddr = Multiaddr(cls._UNIX_SOCKET_PREFIX + f"p2pclient-{socket_uid}.sock")'
+    new2 = 'self._client_listen_maddr = _make_abs_unix_maddr(f"/tmp/hivemind-p2pclient-{socket_uid}.sock")'
+    # (same string; replace any remaining instance)
+    if old2 in text:
+        text = text.replace(old2, new2, 1)
+
+    p2pd_path.write_text(text)
+    print("  hivemind p2p_daemon.py patched (Unix socket absolute path fix)")
+
+
 def patch_hivemind_grad_scaler(site_pkgs: pathlib.Path):
     """Patch hivemind grad_scaler.py for torch>=2.5 compatibility."""
     gs_path = site_pkgs / "hivemind" / "optim" / "grad_scaler.py"
@@ -501,6 +574,7 @@ def main():
     patch_auto_config(utils_dir)
     patch_convert_block(utils_dir)
     patch_hivemind_grad_scaler(site_pkgs)
+    patch_hivemind_p2pd(site_pkgs)
 
     for spec in MODELS:
         patch_model(models_dir, spec)
