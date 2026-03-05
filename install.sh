@@ -318,22 +318,30 @@ PY
     "$hf_hub_spec" \
     "$transformers_spec" \
     "$numpy_spec" \
-    "${petals_pip_args[@]}" \
-    petals
+    "${petals_pip_args[@]}"
+
+  # Install petals with --no-deps to avoid pip's version-resolution conflict:
+  # petals>=1.x pins transformers to <5.0.x, but we need transformers>=5.x for
+  # Qwen3 support.  All of petals' actual runtime dependencies (torch, hivemind,
+  # accelerate, huggingface-hub, transformers) are installed separately in this
+  # script, so --no-deps is safe here.
+  petals_spec="${BEAM_PETALS_SPEC:-petals==2.2.0.post1}"
+  echo "Installing petals (no-deps, pinned): $petals_spec"
+  "$petals_venv/bin/python" -m pip install --no-deps --force-reinstall "$petals_spec"
+
+  # bitsandbytes is used by petals for 8-bit quantization of server blocks.
+  # Install a version compatible with the installed torch without constraining
+  # the resolution to the old pin petals' metadata specifies.
+  bitsandbytes_spec="${BEAM_PETALS_BITSANDBYTES_SPEC:-bitsandbytes>=0.41.1}"
+  "$petals_venv/bin/python" -m pip install --upgrade "$bitsandbytes_spec" || \
+    echo "WARNING: bitsandbytes install failed — 8-bit quantization unavailable (non-fatal)"
+
   if ! "$petals_venv/bin/python" -c "import petals" 2>/dev/null; then
-    echo "WARNING: petals is not importable after pip install — retrying without --no-build-isolation"
-    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
-      "$hf_hub_spec" \
-      "$transformers_spec" \
-      "$numpy_spec" \
-      petals
-    if ! "$petals_venv/bin/python" -c "import petals" 2>/dev/null; then
-      echo "ERROR: petals failed to install. Cannot start node with petals runtime."
-      echo "Check pip output above for errors. Try setting BEAM_PETALS_TORCH_SPEC or BEAM_PETALS_TRANSFORMERS_SPEC."
-      return 1
-    fi
-    echo "petals installed successfully (fallback succeeded)"
+    echo "ERROR: petals failed to install. Cannot start node with petals runtime."
+    echo "Check pip output above for errors. You can override the version with BEAM_PETALS_SPEC."
+    return 1
   fi
+  echo "petals installed successfully."
   if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
     if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
       "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
