@@ -298,7 +298,7 @@ PY
     fi
   fi
   hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub>=0.28.0}"
-  transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers>=4.51.0,<5.0}"
+  transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers>=5.2.0,<6.0}"
   numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
   pydantic_spec="${BEAM_PETALS_PYDANTIC_SPEC:-pydantic<2.0.0}"
   accelerate_specs="${BEAM_PETALS_ACCELERATE_SPECS:-}"
