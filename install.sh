@@ -410,24 +410,38 @@ PY
   # Patch petals __init__.py to remove the hard transformers version assertion
   # (petals 2.x asserts transformers<4.35 but Beam needs transformers>=5.2).
   "$petals_venv/bin/python" - <<'PY'
-import pathlib, re, sysconfig
+import pathlib, sysconfig
 site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
 init_path = site_pkgs / "petals" / "__init__.py"
 if not init_path.exists():
     print("petals __init__.py not found; skipping version assertion patch")
     raise SystemExit(0)
+marker = "version.parse(transformers.__version__)"
 text = init_path.read_text()
-patched = re.sub(
-    r'^\s*assert\s+version\.parse\([^)]+\)\s*<=\s*version\.parse\(transformers\.__version__\).*$',
-    '# (assertion removed by Beam installer to allow transformers>=5)',
-    text,
-    flags=re.MULTILINE,
-)
-if patched == text:
+if marker not in text:
     print("petals transformers version assertion not found or already patched")
-else:
-    init_path.write_text(patched)
-    print("Patched petals __init__.py: removed transformers version assertion")
+    raise SystemExit(0)
+lines = text.splitlines(keepends=True)
+# Find the line index containing the marker
+marker_idx = next(i for i, l in enumerate(lines) if marker in l)
+# Walk backward to find the assert keyword
+start = marker_idx
+while start > 0 and "assert" not in lines[start]:
+    start -= 1
+# Walk forward to find the end of the assert (closing paren + optional message)
+end = marker_idx
+paren_depth = sum(l.count("(") - l.count(")") for l in lines[start:end + 1])
+while end + 1 < len(lines) and (paren_depth > 0 or lines[end].rstrip().endswith("\\")):
+    end += 1
+    paren_depth += lines[end].count("(") - lines[end].count(")")
+indent = len(lines[start]) - len(lines[start].lstrip())
+out = (
+    lines[:start]
+    + [" " * indent + "pass  # assertion removed by Beam installer\n"]
+    + lines[end + 1:]
+)
+init_path.write_text("".join(out))
+print("Patched petals __init__.py: removed transformers version assertion")
 PY
 
   accelerate_ok="false"
