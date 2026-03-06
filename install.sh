@@ -336,6 +336,180 @@ PY
     fi
   fi
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2" "setuptools<70"
+  # Patch petals BEFORE the import check so transformers 5.x doesn't break the check.
+  # Patch petals server/from_pretrained.py: get_file_from_repo was removed from
+  # transformers in newer versions; shim it via huggingface_hub directly.
+  "$petals_venv/bin/python" - <<'PY'
+import pathlib, sysconfig
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+path = site_pkgs / "petals" / "server" / "from_pretrained.py"
+if not path.exists():
+    print("petals/server/from_pretrained.py not found; skipping")
+    raise SystemExit(0)
+old = "from transformers.utils import get_file_from_repo"
+new = """try:
+    from transformers.utils import get_file_from_repo
+except ImportError:
+    import os as _os
+    from huggingface_hub import hf_hub_download as _hf_dl
+    def get_file_from_repo(path_or_repo, filename, **kw):
+        kw.pop("use_auth_token", None)
+        if _os.path.isdir(path_or_repo):
+            p = _os.path.join(path_or_repo, filename)
+            return p if _os.path.exists(p) else None
+        return _hf_dl(path_or_repo, filename, **kw)"""
+text = path.read_text()
+if old not in text:
+    print("petals get_file_from_repo shim already applied or pattern not found")
+else:
+    path.write_text(text.replace(old, new, 1))
+    print("Patched petals/server/from_pretrained.py: shimmed get_file_from_repo")
+PY
+
+  # Patch petals __init__.py to remove the hard transformers version assertion
+  # (petals 2.x asserts transformers<4.35 but Beam needs newer transformers).
+  "$petals_venv/bin/python" - <<'PY'
+import pathlib, sysconfig
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+init_path = site_pkgs / "petals" / "__init__.py"
+if not init_path.exists():
+    print("petals __init__.py not found; skipping version assertion patch")
+    raise SystemExit(0)
+marker = "version.parse(transformers.__version__)"
+text = init_path.read_text()
+if marker not in text:
+    print("petals transformers version assertion not found or already patched")
+    raise SystemExit(0)
+lines = text.splitlines(keepends=True)
+# Find the line index containing the marker
+marker_idx = next(i for i, l in enumerate(lines) if marker in l)
+# Walk backward to find the assert keyword
+start = marker_idx
+while start > 0 and "assert" not in lines[start]:
+    start -= 1
+# Walk forward to find the end of the assert (closing paren + optional message)
+end = marker_idx
+paren_depth = sum(l.count("(") - l.count(")") for l in lines[start:end + 1])
+while end + 1 < len(lines) and (paren_depth > 0 or lines[end].rstrip().endswith("\\")):
+    end += 1
+    paren_depth += lines[end].count("(") - lines[end].count(")")
+indent = len(lines[start]) - len(lines[start].lstrip())
+out = (
+    lines[:start]
+    + [" " * indent + "pass  # assertion removed by Beam installer\n"]
+    + lines[end + 1:]
+)
+init_path.write_text("".join(out))
+print("Patched petals __init__.py: removed transformers version assertion")
+PY
+
+  # Patch petals/utils/peft.py: also imports get_file_from_repo from transformers.
+  "$petals_venv/bin/python" - <<'PY'
+import pathlib, sysconfig
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+path = site_pkgs / "petals" / "utils" / "peft.py"
+if not path.exists():
+    print("petals/utils/peft.py not found; skipping")
+    raise SystemExit(0)
+old = "from transformers.utils import get_file_from_repo"
+new = """try:
+    from transformers.utils import get_file_from_repo
+except ImportError:
+    import os as _os
+    from huggingface_hub import hf_hub_download as _hf_dl
+    def get_file_from_repo(path_or_repo, filename, **kw):
+        kw.pop("use_auth_token", None)
+        if _os.path.isdir(path_or_repo):
+            p = _os.path.join(path_or_repo, filename)
+            return p if _os.path.exists(p) else None
+        return _hf_dl(path_or_repo, filename, **kw)"""
+text = path.read_text()
+if old not in text:
+    print("petals/utils/peft.py get_file_from_repo shim already applied or not found")
+else:
+    path.write_text(text.replace(old, new, 1))
+    print("Patched petals/utils/peft.py: shimmed get_file_from_repo")
+PY
+
+  # Patch petals/client/from_pretrained.py: monkey-patches
+  # modeling_utils.get_checkpoint_shard_files which was removed in transformers 5.x.
+  "$petals_venv/bin/python" - <<'PY'
+import pathlib, sysconfig, re
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+path = site_pkgs / "petals" / "client" / "from_pretrained.py"
+if not path.exists():
+    print("petals/client/from_pretrained.py not found; skipping")
+    raise SystemExit(0)
+text = path.read_text()
+# Guard the modeling_utils import and monkey-patch with a try/except so it
+# silently skips when the function no longer exists in transformers 5.x.
+old_import = "from transformers import modeling_utils"
+new_import = """try:
+    from transformers import modeling_utils as _modeling_utils
+except ImportError:
+    _modeling_utils = None"""
+if old_import in text:
+    text = text.replace(old_import, new_import, 1)
+    # Also guard the monkey-patch itself
+    old_patch = "modeling_utils.get_checkpoint_shard_files = get_checkpoint_shard_files"
+    new_patch = "if _modeling_utils is not None and hasattr(_modeling_utils, 'get_checkpoint_shard_files'):\n    _modeling_utils.get_checkpoint_shard_files = get_checkpoint_shard_files"
+    text = text.replace(old_patch, new_patch, 1)
+    # Replace uses of 'modeling_utils' with '_modeling_utils'
+    text = re.sub(r'\bmodeling_utils\b', '_modeling_utils', text)
+    pathlib.Path(path).write_text(text)
+    print("Patched petals/client/from_pretrained.py: guarded modeling_utils usage")
+else:
+    print("petals/client/from_pretrained.py: modeling_utils import not found or already patched")
+PY
+
+  # Patch petals/client/remote_generation.py: ModelOutput moved in transformers 5.x.
+  "$petals_venv/bin/python" - <<'PY'
+import pathlib, sysconfig
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+path = site_pkgs / "petals" / "client" / "remote_generation.py"
+if not path.exists():
+    print("petals/client/remote_generation.py not found; skipping")
+    raise SystemExit(0)
+text = path.read_text()
+# ModelOutput moved from generation.utils to modeling_outputs in transformers 5.x
+old = "from transformers.generation.utils import ModelOutput"
+new = """try:
+    from transformers.generation.utils import ModelOutput
+except ImportError:
+    from transformers.modeling_outputs import ModelOutput"""
+if old in text:
+    path.write_text(text.replace(old, new, 1))
+    print("Patched petals/client/remote_generation.py: guarded ModelOutput import")
+else:
+    print("petals/client/remote_generation.py: ModelOutput import not found or already patched")
+PY
+
+  # Patch petals/models/llama/speculative_model.py: GenerateNonBeamOutput removed in 5.x.
+  "$petals_venv/bin/python" - <<'PY'
+import pathlib, sysconfig
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+path = site_pkgs / "petals" / "models" / "llama" / "speculative_model.py"
+if not path.exists():
+    print("petals/models/llama/speculative_model.py not found; skipping")
+    raise SystemExit(0)
+text = path.read_text()
+old = "from transformers.generation.utils import GenerateNonBeamOutput, GenerationMixin"
+new = """try:
+    from transformers.generation.utils import GenerateNonBeamOutput, GenerationMixin
+except ImportError:
+    # transformers>=5.x: GenerateNonBeamOutput removed; use GenerateDecoderOnlyOutput
+    try:
+        from transformers.generation.utils import GenerateDecoderOnlyOutput as GenerateNonBeamOutput, GenerationMixin
+    except ImportError:
+        from transformers.modeling_utils import GenerationMixin
+        GenerateNonBeamOutput = None"""
+if old in text:
+    path.write_text(text.replace(old, new, 1))
+    print("Patched petals/models/llama/speculative_model.py: guarded GenerateNonBeamOutput import")
+else:
+    print("petals/models/llama/speculative_model.py: import not found or already patched")
+PY
+
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import petals  # noqa: F401
 import petals.cli  # noqa: F401
@@ -420,72 +594,6 @@ PY
       esac
     fi
   fi
-  # Patch petals server/from_pretrained.py: get_file_from_repo was removed from
-  # transformers in newer versions; shim it via huggingface_hub directly.
-  "$petals_venv/bin/python" - <<'PY'
-import pathlib, sysconfig
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-path = site_pkgs / "petals" / "server" / "from_pretrained.py"
-if not path.exists():
-    print("petals/server/from_pretrained.py not found; skipping")
-    raise SystemExit(0)
-old = "from transformers.utils import get_file_from_repo"
-new = """try:
-    from transformers.utils import get_file_from_repo
-except ImportError:
-    import os as _os
-    from huggingface_hub import hf_hub_download as _hf_dl
-    def get_file_from_repo(path_or_repo, filename, **kw):
-        kw.pop("use_auth_token", None)
-        if _os.path.isdir(path_or_repo):
-            p = _os.path.join(path_or_repo, filename)
-            return p if _os.path.exists(p) else None
-        return _hf_dl(path_or_repo, filename, **kw)"""
-text = path.read_text()
-if old not in text:
-    print("petals get_file_from_repo shim already applied or pattern not found")
-else:
-    path.write_text(text.replace(old, new, 1))
-    print("Patched petals/server/from_pretrained.py: shimmed get_file_from_repo")
-PY
-
-  # Patch petals __init__.py to remove the hard transformers version assertion
-  # (petals 2.x asserts transformers<4.35 but Beam needs newer transformers).
-  "$petals_venv/bin/python" - <<'PY'
-import pathlib, sysconfig
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-init_path = site_pkgs / "petals" / "__init__.py"
-if not init_path.exists():
-    print("petals __init__.py not found; skipping version assertion patch")
-    raise SystemExit(0)
-marker = "version.parse(transformers.__version__)"
-text = init_path.read_text()
-if marker not in text:
-    print("petals transformers version assertion not found or already patched")
-    raise SystemExit(0)
-lines = text.splitlines(keepends=True)
-# Find the line index containing the marker
-marker_idx = next(i for i, l in enumerate(lines) if marker in l)
-# Walk backward to find the assert keyword
-start = marker_idx
-while start > 0 and "assert" not in lines[start]:
-    start -= 1
-# Walk forward to find the end of the assert (closing paren + optional message)
-end = marker_idx
-paren_depth = sum(l.count("(") - l.count(")") for l in lines[start:end + 1])
-while end + 1 < len(lines) and (paren_depth > 0 or lines[end].rstrip().endswith("\\")):
-    end += 1
-    paren_depth += lines[end].count("(") - lines[end].count(")")
-indent = len(lines[start]) - len(lines[start].lstrip())
-out = (
-    lines[:start]
-    + [" " * indent + "pass  # assertion removed by Beam installer\n"]
-    + lines[end + 1:]
-)
-init_path.write_text("".join(out))
-print("Patched petals __init__.py: removed transformers version assertion")
-PY
-
   accelerate_ok="false"
   for accelerate_ver in $accelerate_specs; do
     accelerate_pkg="$accelerate_ver"
