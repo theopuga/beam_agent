@@ -407,8 +407,37 @@ PY
       esac
     fi
   fi
+  # Patch petals server/from_pretrained.py: get_file_from_repo was removed from
+  # transformers in newer versions; shim it via huggingface_hub directly.
+  "$petals_venv/bin/python" - <<'PY'
+import pathlib, sysconfig
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+path = site_pkgs / "petals" / "server" / "from_pretrained.py"
+if not path.exists():
+    print("petals/server/from_pretrained.py not found; skipping")
+    raise SystemExit(0)
+old = "from transformers.utils import get_file_from_repo"
+new = """try:
+    from transformers.utils import get_file_from_repo
+except ImportError:
+    import os as _os
+    from huggingface_hub import hf_hub_download as _hf_dl
+    def get_file_from_repo(path_or_repo, filename, **kw):
+        kw.pop("use_auth_token", None)
+        if _os.path.isdir(path_or_repo):
+            p = _os.path.join(path_or_repo, filename)
+            return p if _os.path.exists(p) else None
+        return _hf_dl(path_or_repo, filename, **kw)"""
+text = path.read_text()
+if old not in text:
+    print("petals get_file_from_repo shim already applied or pattern not found")
+else:
+    path.write_text(text.replace(old, new, 1))
+    print("Patched petals/server/from_pretrained.py: shimmed get_file_from_repo")
+PY
+
   # Patch petals __init__.py to remove the hard transformers version assertion
-  # (petals 2.x asserts transformers<4.35 but Beam needs transformers>=5.2).
+  # (petals 2.x asserts transformers<4.35 but Beam needs newer transformers).
   "$petals_venv/bin/python" - <<'PY'
 import pathlib, sysconfig
 site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
