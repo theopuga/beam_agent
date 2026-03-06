@@ -298,7 +298,7 @@ PY
     fi
   fi
   hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub>=0.28.0}"
-  transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers>=5.2.0}"
+  transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers>=4.51.0,<5.0}"
   numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
   pydantic_spec="${BEAM_PETALS_PYDANTIC_SPEC:-pydantic<2.0.0}"
   accelerate_specs="${BEAM_PETALS_ACCELERATE_SPECS:-}"
@@ -306,7 +306,7 @@ PY
     accelerate_specs="${BEAM_PETALS_ACCELERATE_SPEC}"
   fi
   if [[ -z "$accelerate_specs" ]]; then
-    accelerate_specs="0.31.0 0.30.1 0.29.3 0.28.0 0.27.2 0.26.1 0.25.0 0.24.1 0.23.0 0.22.0"
+    accelerate_specs="1.3.0 1.2.0 1.1.0 1.0.0 0.34.2 0.34.1 0.31.0 0.30.1 0.29.3 0.28.0 0.27.2 0.26.1 0.25.0 0.24.1 0.23.0 0.22.0"
   fi
   
   petals_pip_args=()
@@ -314,12 +314,14 @@ PY
     petals_pip_args+=(--no-build-isolation)
   fi
 
+  # Install petals with a transformers version it supports, then upgrade
+  # transformers separately (petals caps transformers<5 but Qwen3.5 MoE needs >=5.2).
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
     "$hf_hub_spec" \
-    "$transformers_spec" \
     "$numpy_spec" \
     "${petals_pip_args[@]}" \
     petals
+  "$petals_venv/bin/python" -m pip install --upgrade "$transformers_spec"
   if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
     if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
       "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
@@ -405,6 +407,72 @@ PY
       esac
     fi
   fi
+  # Patch petals server/from_pretrained.py: get_file_from_repo was removed from
+  # transformers in newer versions; shim it via huggingface_hub directly.
+  "$petals_venv/bin/python" - <<'PY'
+import pathlib, sysconfig
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+path = site_pkgs / "petals" / "server" / "from_pretrained.py"
+if not path.exists():
+    print("petals/server/from_pretrained.py not found; skipping")
+    raise SystemExit(0)
+old = "from transformers.utils import get_file_from_repo"
+new = """try:
+    from transformers.utils import get_file_from_repo
+except ImportError:
+    import os as _os
+    from huggingface_hub import hf_hub_download as _hf_dl
+    def get_file_from_repo(path_or_repo, filename, **kw):
+        kw.pop("use_auth_token", None)
+        if _os.path.isdir(path_or_repo):
+            p = _os.path.join(path_or_repo, filename)
+            return p if _os.path.exists(p) else None
+        return _hf_dl(path_or_repo, filename, **kw)"""
+text = path.read_text()
+if old not in text:
+    print("petals get_file_from_repo shim already applied or pattern not found")
+else:
+    path.write_text(text.replace(old, new, 1))
+    print("Patched petals/server/from_pretrained.py: shimmed get_file_from_repo")
+PY
+
+  # Patch petals __init__.py to remove the hard transformers version assertion
+  # (petals 2.x asserts transformers<4.35 but Beam needs newer transformers).
+  "$petals_venv/bin/python" - <<'PY'
+import pathlib, sysconfig
+site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
+init_path = site_pkgs / "petals" / "__init__.py"
+if not init_path.exists():
+    print("petals __init__.py not found; skipping version assertion patch")
+    raise SystemExit(0)
+marker = "version.parse(transformers.__version__)"
+text = init_path.read_text()
+if marker not in text:
+    print("petals transformers version assertion not found or already patched")
+    raise SystemExit(0)
+lines = text.splitlines(keepends=True)
+# Find the line index containing the marker
+marker_idx = next(i for i, l in enumerate(lines) if marker in l)
+# Walk backward to find the assert keyword
+start = marker_idx
+while start > 0 and "assert" not in lines[start]:
+    start -= 1
+# Walk forward to find the end of the assert (closing paren + optional message)
+end = marker_idx
+paren_depth = sum(l.count("(") - l.count(")") for l in lines[start:end + 1])
+while end + 1 < len(lines) and (paren_depth > 0 or lines[end].rstrip().endswith("\\")):
+    end += 1
+    paren_depth += lines[end].count("(") - lines[end].count(")")
+indent = len(lines[start]) - len(lines[start].lstrip())
+out = (
+    lines[:start]
+    + [" " * indent + "pass  # assertion removed by Beam installer\n"]
+    + lines[end + 1:]
+)
+init_path.write_text("".join(out))
+print("Patched petals __init__.py: removed transformers version assertion")
+PY
+
   accelerate_ok="false"
   for accelerate_ver in $accelerate_specs; do
     accelerate_pkg="$accelerate_ver"
