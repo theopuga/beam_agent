@@ -322,16 +322,9 @@ PY
     "${petals_pip_args[@]}" \
     petals
   "$petals_venv/bin/python" -m pip install --upgrade "$transformers_spec"
-  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
-import petals  # noqa: F401
-import petals.cli  # noqa: F401
-PY
-  then
-    echo "ERROR: petals is not importable after installation."
-    echo "The pip install may have failed partway. Try reinstalling manually:"
-    echo "  $petals_venv/bin/pip install --force-reinstall petals"
-    return 1
-  fi
+  # Re-pin torch/numpy BEFORE the import check: the petals install above uses
+  # --force-reinstall which upgrades torch to its latest (2.10+), breaking
+  # hivemind's grad_scaler import (OptState removed in torch>=2.6).
   if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
     if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
       "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
@@ -343,6 +336,16 @@ PY
     fi
   fi
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2" "setuptools<70"
+  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
+import petals  # noqa: F401
+import petals.cli  # noqa: F401
+PY
+  then
+    echo "ERROR: petals is not importable after installation."
+    echo "The pip install may have failed partway. Try reinstalling manually:"
+    echo "  $petals_venv/bin/pip install --force-reinstall petals"
+    return 1
+  fi
   hivemind_spec="${BEAM_PETALS_HIVEMIND_SPEC:-hivemind @ git+https://github.com/learning-at-home/hivemind.git@213bff98a62accb91f254e2afdccbf1d69ebdea9}"
   hivemind_pip_args=()
   if [[ "${BEAM_PETALS_HIVEMIND_PIP_NO_BUILD_ISOLATION:-true}" == "true" ]]; then
