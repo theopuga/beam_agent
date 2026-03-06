@@ -314,12 +314,14 @@ PY
     petals_pip_args+=(--no-build-isolation)
   fi
 
+  # Install petals with a transformers version it supports, then upgrade
+  # transformers separately (petals caps transformers<5 but Qwen3.5 MoE needs >=5.2).
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
     "$hf_hub_spec" \
-    "$transformers_spec" \
     "$numpy_spec" \
     "${petals_pip_args[@]}" \
     petals
+  "$petals_venv/bin/python" -m pip install --upgrade --no-deps "$transformers_spec"
   if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
     if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
       "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
