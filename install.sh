@@ -316,11 +316,21 @@ PY
 
   # Install petals from the beam repo (already patched for transformers 5.x).
   # We avoid PyPI petals entirely — it pins transformers<4.35 and hf-hub<1.0.
+  #
+  # For private repos, set BEAM_REPO_TOKEN to a GitHub Personal Access Token
+  # with read:contents scope. The token is injected into the HTTPS URL and
+  # never printed to stdout.
   beam_repo_url="${BEAM_REPO_URL:-https://github.com/fuegocoding/beam.git}"
   beam_repo_ref="${BEAM_REPO_REF:-main}"
+  if [[ -n "${BEAM_REPO_TOKEN:-}" ]]; then
+    # Inject token: https://github.com/... -> https://<token>@github.com/...
+    beam_repo_url_auth="${beam_repo_url/https:\/\//https:\/\/${BEAM_REPO_TOKEN}@}"
+  else
+    beam_repo_url_auth="$beam_repo_url"
+  fi
   echo "Installing petals from beam repo: $beam_repo_url @ $beam_repo_ref"
   "$petals_venv/bin/python" -m pip install --no-deps \
-    "petals @ git+${beam_repo_url}@${beam_repo_ref}#subdirectory=engine"
+    "petals @ git+${beam_repo_url_auth}@${beam_repo_ref}#subdirectory=engine"
 
   # Install all runtime deps at the correct versions (no stale pins from PyPI petals).
   "$petals_venv/bin/python" -m pip install "${petals_pip_args[@]}" \
