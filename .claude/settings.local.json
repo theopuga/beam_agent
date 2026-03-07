@@ -7,7 +7,8 @@
       "Bash(done)",
       "Bash(for d in qwen3_5_moe glm_moe_dsa kimi_k2)",
       "Bash(do echo \"=== $d/config.py ===\")",
-      "Bash(do echo \"=== $d/model.py ===\")"
+      "Bash(do echo \"=== $d/model.py ===\")",
+      "Bash(python -c \":*)"
     ]
   }
 }
