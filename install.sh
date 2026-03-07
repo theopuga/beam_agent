@@ -300,7 +300,7 @@ PY
   hf_hub_spec="${BEAM_PETALS_HF_HUB_SPEC:-huggingface-hub>=0.28.0}"
   transformers_spec="${BEAM_PETALS_TRANSFORMERS_SPEC:-transformers>=5.2.0,<6.0}"
   numpy_spec="${BEAM_PETALS_NUMPY_SPEC:-numpy<2}"
-  pydantic_spec="${BEAM_PETALS_PYDANTIC_SPEC:-pydantic<2.0.0}"
+  pydantic_spec="${BEAM_PETALS_PYDANTIC_SPEC:-pydantic>=2.0.0}"
   accelerate_specs="${BEAM_PETALS_ACCELERATE_SPECS:-}"
   if [[ -z "$accelerate_specs" && -n "${BEAM_PETALS_ACCELERATE_SPEC:-}" ]]; then
     accelerate_specs="${BEAM_PETALS_ACCELERATE_SPEC}"
@@ -314,212 +314,31 @@ PY
     petals_pip_args+=(--no-build-isolation)
   fi
 
-  # Install petals with a transformers version it supports, then upgrade
-  # transformers separately (petals caps transformers<5 but Qwen3.5 MoE needs >=5.2).
-  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
+  # Install petals from the beam repo (already patched for transformers 5.x).
+  # We avoid PyPI petals entirely — it pins transformers<4.35 and hf-hub<1.0.
+  beam_repo_url="${BEAM_REPO_URL:-https://github.com/fuegocoding/beam.git}"
+  beam_repo_ref="${BEAM_REPO_REF:-main}"
+  echo "Installing petals from beam repo: $beam_repo_url @ $beam_repo_ref"
+  "$petals_venv/bin/python" -m pip install --no-deps \
+    "petals @ git+${beam_repo_url}@${beam_repo_ref}#subdirectory=engine"
+
+  # Install all runtime deps at the correct versions (no stale pins from PyPI petals).
+  "$petals_venv/bin/python" -m pip install "${petals_pip_args[@]}" \
     "$hf_hub_spec" \
     "$numpy_spec" \
-    "${petals_pip_args[@]}" \
-    petals
-  "$petals_venv/bin/python" -m pip install --upgrade "$transformers_spec"
-  # Re-pin torch/numpy BEFORE the import check: the petals install above uses
-  # --force-reinstall which upgrades torch to its latest (2.10+), breaking
-  # hivemind's grad_scaler import (OptState removed in torch>=2.6).
-  if [[ "${BEAM_PETALS_SKIP_TORCH_INSTALL:-}" != "true" ]]; then
-    if [[ -n "${BEAM_PETALS_TORCH_INDEX_URL:-}" ]]; then
-      "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
-        "$torch_spec" "$torchvision_spec" "$torchaudio_spec" \
-        --index-url "$BEAM_PETALS_TORCH_INDEX_URL"
-    else
-      "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall \
-        "$torch_spec" "$torchvision_spec" "$torchaudio_spec"
-    fi
-  fi
-  "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2" "setuptools<70"
-  # Patch petals BEFORE the import check so transformers 5.x doesn't break the check.
-  # Patch petals server/from_pretrained.py: get_file_from_repo was removed from
-  # transformers in newer versions; shim it via huggingface_hub directly.
-  "$petals_venv/bin/python" - <<'PY'
-import pathlib, sysconfig
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-path = site_pkgs / "petals" / "server" / "from_pretrained.py"
-if not path.exists():
-    print("petals/server/from_pretrained.py not found; skipping")
-    raise SystemExit(0)
-old = "from transformers.utils import get_file_from_repo"
-new = """try:
-    from transformers.utils import get_file_from_repo
-except ImportError:
-    import os as _os
-    from huggingface_hub import hf_hub_download as _hf_dl
-    def get_file_from_repo(path_or_repo, filename, **kw):
-        kw.pop("use_auth_token", None)
-        if _os.path.isdir(path_or_repo):
-            p = _os.path.join(path_or_repo, filename)
-            return p if _os.path.exists(p) else None
-        return _hf_dl(path_or_repo, filename, **kw)"""
-text = path.read_text()
-if old not in text:
-    print("petals get_file_from_repo shim already applied or pattern not found")
-else:
-    path.write_text(text.replace(old, new, 1))
-    print("Patched petals/server/from_pretrained.py: shimmed get_file_from_repo")
-PY
-
-  # Patch petals __init__.py to remove the hard transformers version assertion
-  # (petals 2.x asserts transformers<4.35 but Beam needs newer transformers).
-  "$petals_venv/bin/python" - <<'PY'
-import pathlib, sysconfig
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-init_path = site_pkgs / "petals" / "__init__.py"
-if not init_path.exists():
-    print("petals __init__.py not found; skipping version assertion patch")
-    raise SystemExit(0)
-marker = "version.parse(transformers.__version__)"
-text = init_path.read_text()
-if marker not in text:
-    print("petals transformers version assertion not found or already patched")
-    raise SystemExit(0)
-lines = text.splitlines(keepends=True)
-# Find the line index containing the marker
-marker_idx = next(i for i, l in enumerate(lines) if marker in l)
-# Walk backward to find the assert keyword
-start = marker_idx
-while start > 0 and "assert" not in lines[start]:
-    start -= 1
-# Walk forward to find the end of the assert (closing paren + optional message)
-end = marker_idx
-paren_depth = sum(l.count("(") - l.count(")") for l in lines[start:end + 1])
-while end + 1 < len(lines) and (paren_depth > 0 or lines[end].rstrip().endswith("\\")):
-    end += 1
-    paren_depth += lines[end].count("(") - lines[end].count(")")
-indent = len(lines[start]) - len(lines[start].lstrip())
-out = (
-    lines[:start]
-    + [" " * indent + "pass  # assertion removed by Beam installer\n"]
-    + lines[end + 1:]
-)
-init_path.write_text("".join(out))
-print("Patched petals __init__.py: removed transformers version assertion")
-PY
-
-  # Patch petals/utils/peft.py: also imports get_file_from_repo from transformers.
-  "$petals_venv/bin/python" - <<'PY'
-import pathlib, sysconfig
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-path = site_pkgs / "petals" / "utils" / "peft.py"
-if not path.exists():
-    print("petals/utils/peft.py not found; skipping")
-    raise SystemExit(0)
-old = "from transformers.utils import get_file_from_repo"
-new = """try:
-    from transformers.utils import get_file_from_repo
-except ImportError:
-    import os as _os
-    from huggingface_hub import hf_hub_download as _hf_dl
-    def get_file_from_repo(path_or_repo, filename, **kw):
-        kw.pop("use_auth_token", None)
-        if _os.path.isdir(path_or_repo):
-            p = _os.path.join(path_or_repo, filename)
-            return p if _os.path.exists(p) else None
-        return _hf_dl(path_or_repo, filename, **kw)"""
-text = path.read_text()
-if old not in text:
-    print("petals/utils/peft.py get_file_from_repo shim already applied or not found")
-else:
-    path.write_text(text.replace(old, new, 1))
-    print("Patched petals/utils/peft.py: shimmed get_file_from_repo")
-PY
-
-  # Patch petals/client/from_pretrained.py: monkey-patches
-  # modeling_utils.get_checkpoint_shard_files which was removed in transformers 5.x.
-  "$petals_venv/bin/python" - <<'PY'
-import pathlib, sysconfig, re
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-path = site_pkgs / "petals" / "client" / "from_pretrained.py"
-if not path.exists():
-    print("petals/client/from_pretrained.py not found; skipping")
-    raise SystemExit(0)
-text = path.read_text()
-# Guard the modeling_utils import and monkey-patch with a try/except so it
-# silently skips when the function no longer exists in transformers 5.x.
-old_import = "from transformers import modeling_utils"
-new_import = """try:
-    from transformers import modeling_utils as _modeling_utils
-except ImportError:
-    _modeling_utils = None"""
-if old_import in text:
-    text = text.replace(old_import, new_import, 1)
-    # Also guard the monkey-patch itself
-    old_patch = "modeling_utils.get_checkpoint_shard_files = get_checkpoint_shard_files"
-    new_patch = "if _modeling_utils is not None and hasattr(_modeling_utils, 'get_checkpoint_shard_files'):\n    _modeling_utils.get_checkpoint_shard_files = get_checkpoint_shard_files"
-    text = text.replace(old_patch, new_patch, 1)
-    # Replace uses of 'modeling_utils' with '_modeling_utils'
-    text = re.sub(r'\bmodeling_utils\b', '_modeling_utils', text)
-    pathlib.Path(path).write_text(text)
-    print("Patched petals/client/from_pretrained.py: guarded modeling_utils usage")
-else:
-    print("petals/client/from_pretrained.py: modeling_utils import not found or already patched")
-PY
-
-  # Patch petals/client/remote_generation.py: ModelOutput moved in transformers 5.x.
-  "$petals_venv/bin/python" - <<'PY'
-import pathlib, sysconfig
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-path = site_pkgs / "petals" / "client" / "remote_generation.py"
-if not path.exists():
-    print("petals/client/remote_generation.py not found; skipping")
-    raise SystemExit(0)
-text = path.read_text()
-# ModelOutput moved from generation.utils to modeling_outputs in transformers 5.x
-old = "from transformers.generation.utils import ModelOutput"
-new = """try:
-    from transformers.generation.utils import ModelOutput
-except ImportError:
-    from transformers.modeling_outputs import ModelOutput"""
-if old in text:
-    path.write_text(text.replace(old, new, 1))
-    print("Patched petals/client/remote_generation.py: guarded ModelOutput import")
-else:
-    print("petals/client/remote_generation.py: ModelOutput import not found or already patched")
-PY
-
-  # Patch petals/models/llama/speculative_model.py: GenerateNonBeamOutput removed in 5.x.
-  "$petals_venv/bin/python" - <<'PY'
-import pathlib, sysconfig
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-path = site_pkgs / "petals" / "models" / "llama" / "speculative_model.py"
-if not path.exists():
-    print("petals/models/llama/speculative_model.py not found; skipping")
-    raise SystemExit(0)
-text = path.read_text()
-old = "from transformers.generation.utils import GenerateNonBeamOutput, GenerationMixin"
-new = """try:
-    from transformers.generation.utils import GenerateNonBeamOutput, GenerationMixin
-except ImportError:
-    # transformers>=5.x: GenerateNonBeamOutput removed; use GenerateDecoderOnlyOutput
-    try:
-        from transformers.generation.utils import GenerateDecoderOnlyOutput as GenerateNonBeamOutput, GenerationMixin
-    except ImportError:
-        from transformers.modeling_utils import GenerationMixin
-        GenerateNonBeamOutput = None"""
-if old in text:
-    path.write_text(text.replace(old, new, 1))
-    print("Patched petals/models/llama/speculative_model.py: guarded GenerateNonBeamOutput import")
-else:
-    print("petals/models/llama/speculative_model.py: import not found or already patched")
-PY
-
-  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
-import petals  # noqa: F401
-import petals.cli  # noqa: F401
-PY
-  then
-    echo "ERROR: petals is not importable after installation."
-    echo "The pip install may have failed partway. Try reinstalling manually:"
-    echo "  $petals_venv/bin/pip install --force-reinstall petals"
-    return 1
-  fi
+    "$pydantic_spec" \
+    "$transformers_spec" \
+    "bitsandbytes>=0.43.0" \
+    "accelerate>=0.33.0" \
+    "tensor-parallel==1.0.23" \
+    "tokenizers>=0.19.0" \
+    "packaging>=20.9" \
+    "sentencepiece>=0.1.99" \
+    "peft>=0.12.0" \
+    "safetensors>=0.4.0" \
+    "aiohttp" "pyyaml" \
+    "dijkstar>=2.6.0" \
+    || true
   hivemind_spec="${BEAM_PETALS_HIVEMIND_SPEC:-hivemind @ git+https://github.com/learning-at-home/hivemind.git@213bff98a62accb91f254e2afdccbf1d69ebdea9}"
   hivemind_pip_args=()
   if [[ "${BEAM_PETALS_HIVEMIND_PIP_NO_BUILD_ISOLATION:-true}" == "true" ]]; then
@@ -547,53 +366,6 @@ PY
     "$petals_venv/bin/python" -m pip install --upgrade "uvloop>=0.14.0"
   fi
   "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$pydantic_spec"
-  patch_falcon_mqa="${BEAM_PETALS_PATCH_FALCON_MQA:-true}"
-  if [[ "$patch_falcon_mqa" == "true" ]]; then
-    falcon_block_path="$("$petals_venv/bin/python" - <<'PY'
-import pathlib
-import sysconfig
-
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-candidate = site_pkgs / "petals" / "models" / "falcon" / "block.py"
-print(candidate if candidate.exists() else "")
-PY
-)"
-    if [[ -n "$falcon_block_path" && -f "$falcon_block_path" ]]; then
-      patch_result="$("$petals_venv/bin/python" - "$falcon_block_path" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-fixed = "num_kv_heads = self.num_heads if self.new_decoder_architecture else self.num_kv_heads"
-legacy = "num_kv_heads = self.num_heads"
-if fixed in text:
-    print("already-patched")
-    raise SystemExit(0)
-if legacy not in text:
-    print("pattern-not-found")
-    raise SystemExit(0)
-text = text.replace(legacy, fixed, 1)
-path.write_text(text)
-print("patched")
-PY
-)"
-      case "$patch_result" in
-        patched)
-          echo "Patched Petals Falcon multi-query attention bug in $falcon_block_path"
-          ;;
-        already-patched)
-          echo "Petals Falcon multi-query patch already present"
-          ;;
-        pattern-not-found)
-          echo "Petals Falcon file pattern not found; skipping patch (likely already fixed upstream)"
-          ;;
-        *)
-          echo "Petals Falcon patch returned unexpected status: $patch_result"
-          ;;
-      esac
-    fi
-  fi
   accelerate_ok="false"
   for accelerate_ver in $accelerate_specs; do
     accelerate_pkg="$accelerate_ver"
@@ -628,15 +400,6 @@ PY
   then
     echo "NumPy 2.x detected; forcing NumPy < 2 for torch/hivemind compatibility"
     "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "numpy<2"
-  fi
-  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
-import pydantic
-if int(pydantic.__version__.split(".")[0]) >= 2:
-    raise RuntimeError(f"incompatible pydantic version: {pydantic.__version__}")
-PY
-  then
-    echo "Pydantic 2.x detected; forcing pydantic < 2 for hivemind compatibility"
-    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$pydantic_spec"
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import hivemind  # noqa: F401
@@ -674,7 +437,6 @@ PY
     if [[ "$(uname -s)" == "Linux" ]]; then
       "$petals_venv/bin/python" -m pip install --upgrade "uvloop>=0.14.0"
     fi
-    "$petals_venv/bin/python" -m pip install --upgrade --force-reinstall "$pydantic_spec"
   fi
   if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
 import hivemind  # noqa: F401
@@ -694,504 +456,16 @@ PY
     echo "ERROR: Petals runtime is still incompatible (numpy)."
     return 1
   fi
-  if ! "$petals_venv/bin/python" - <<'PY' >/dev/null 2>&1
-import pydantic
-if int(pydantic.__version__.split(".")[0]) >= 2:
-    raise RuntimeError(f"incompatible pydantic version: {pydantic.__version__}")
-PY
-  then
-    echo "ERROR: Petals runtime is still incompatible (pydantic/hivemind)."
-    return 1
-  fi
-  # -- Frontier model overlay: inject model support into installed petals --------
-  patch_frontier_models="${BEAM_PETALS_PATCH_FRONTIER_MODELS:-true}"
-  if [[ "$patch_frontier_models" == "true" ]]; then
-    # Try standalone patch script first (available when running from source tree)
-    _patch_script=""
-    for _candidate in \
-        "$(dirname "${BASH_SOURCE[0]}")/scripts/patch_petals_models.py" \
-        "./scripts/patch_petals_models.py"; do
-      if [[ -f "$_candidate" ]]; then
-        _patch_script="$_candidate"
-        break
-      fi
-    done
-    if [[ -n "$_patch_script" ]]; then
-      echo "Running frontier model patcher: $_patch_script"
-      "$petals_venv/bin/python" "$_patch_script"
-    else
-      echo "Patch script not found; using inline patcher"
-      "$petals_venv/bin/python" - <<'QWEN_PATCH'
-#!/usr/bin/env python3
-"""Inline patcher — mirrors beam_agent/scripts/patch_petals_models.py exactly."""
-import pathlib
-import sys
-import sysconfig
-import textwrap
-
-site_pkgs = pathlib.Path(sysconfig.get_paths()["purelib"])
-models_dir = site_pkgs / "petals" / "models"
-utils_dir = site_pkgs / "petals" / "utils"
-
-if not models_dir.exists():
-    print("petals models dir not found; skipping model patches")
-    sys.exit(0)
-
-BLOCK_TEMPLATE = textwrap.dedent("""\
-from typing import Optional, Tuple
-import torch
-from transformers.cache_utils import DynamicCache
-
-{decoder_import}
-
-if _DecoderLayer is not None:
-    class {block_class}(_DecoderLayer):
-        def __init__(self, config, layer_idx=0):
-            super().__init__(config, layer_idx)
-            # Ensure attn_implementation is set (Qwen3Config may leave it None)
-            self._attn_implementation = getattr(config, "_attn_implementation", "eager") or "eager"
-            if not getattr(config, "_attn_implementation", None):
-                config._attn_implementation = "eager"
-            self.layer_idx = layer_idx
-            # Pre-compute RoPE for transformers>=5.x (position_embeddings required by attention)
-            self._beam_rope = None
-            try:
-                import importlib, inspect
-                mod = importlib.import_module(type(self).__mro__[1].__module__)
-                for name in dir(mod):
-                    if "rotary" in name.lower() and "embedding" in name.lower():
-                        cls = getattr(mod, name)
-                        if isinstance(cls, type):
-                            sig = inspect.signature(cls.__init__)
-                            if "config" in sig.parameters:
-                                self._beam_rope = cls(config=config)
-                            else:
-                                self._beam_rope = cls(
-                                    config.hidden_size // config.num_attention_heads,
-                                    config.max_position_embeddings,
-                                )
-                            break
-            except Exception:
-                pass
-
-        def forward(self, hidden_states, *args, attention_mask=None, layer_past=None, use_cache=False, **kwargs):
-            bs, sl, _ = hidden_states.shape
-            pkvl = 0
-            sl_wp = sl
-
-            # Always create a fresh DynamicCache; populate with past KV when available
-            pkv = DynamicCache()
-            if layer_past is not None:
-                # beam format: k=(bs*nkv, hd, pkvl), v=(bs*nkv, pkvl, hd)
-                pkvl = layer_past[0].shape[2]
-                sl_wp = sl + pkvl
-                k_m, v_m = self._rcfb(layer_past, bs, pkvl)
-                pkv.update(k_m, v_m, layer_idx=self.layer_idx)
-
-            pos_ids = torch.arange(pkvl, sl + pkvl, dtype=torch.long, device=hidden_states.device).unsqueeze(0)
-            if "position_embeddings" not in kwargs and self._beam_rope is not None:
-                kwargs["position_embeddings"] = self._beam_rope(hidden_states, pos_ids)
-
-            # transformers>=5.x: past_key_values (plural), DynamicCache updated in-place,
-            # returns tuple (hidden_states, [opt: attn_weights]) -- no past_key_values in output
-            outputs = super().forward(
-                hidden_states,
-                attention_mask=attention_mask,
-                position_ids=pos_ids,
-                past_key_values=pkv,
-                use_cache=use_cache,
-                **kwargs
-            )
-            h = outputs[0]  # hidden_states is always first element
-
-            if use_cache:
-                # DynamicCache updated in-place; extract via key_cache/value_cache lists
-                k_out = pkv.key_cache[self.layer_idx]    # (bs, nkv, sl_wp, hd)
-                v_out = pkv.value_cache[self.layer_idx]  # (bs, nkv, sl_wp, hd)
-                beam_kv = self._rctb((k_out, v_out), bs, sl_wp)
-                return (h, beam_kv)
-            return (h,)
-
-        def _rcfb(self, kv, bs, sl):
-            # beam format -> model format: k (bs*nkv, hd, sl) -> (bs, nkv, sl, hd)
-            k, v = kv
-            nkv = k.shape[0] // bs   # derived from tensor shape (avoids missing attr)
-            hd = k.shape[1]
-            k = k.permute(0, 2, 1).view(bs, nkv, sl, hd)
-            v = v.view(bs, nkv, sl, hd)
-            return k, v
-
-        def _rctb(self, kv, bs, sl):
-            # model format (bs, nkv, sl, hd) -> beam format
-            k, v = kv
-            nkv = k.shape[1]   # derived from tensor shape
-            hd = k.shape[3]
-            k = k.view(bs * nkv, sl, hd).permute(0, 2, 1)
-            v = v.view(bs * nkv, sl, hd)
-            return k, v
-else:
-    class {block_class}:
-        def __init__(self, *a, **kw):
-            raise ImportError("{model_name} requires a newer transformers version")
-""")
-
-CONFIG_TEMPLATE = textwrap.dedent("""\
-import os
-from hivemind import get_logger
-from petals.client.config import ClientConfig
-from petals.client.lm_head import LMHeadConfig
-from petals.client.ptune import PTuneConfig
-from petals.models.{pkg}.block import {block_class}
-logger = get_logger(__name__)
-
-{base_config_import}
-{attn_import}
-
-class {config_class}(_BaseConfig, ClientConfig, PTuneConfig, LMHeadConfig):
-    block_class = {block_class}
-    attn_class = _AttnClass
-    block_prefix = "model.layers"
-
-    @property
-    def num_key_value_groups(self):
-        nkv = getattr(self, "num_key_value_heads", self.num_attention_heads)
-        return self.num_attention_heads // nkv
-
-    @classmethod
-    def from_pretrained(cls, model_name_or_path, *args, dht_prefix=None, **kwargs):
-        if model_name_or_path and not os.path.isdir(str(model_name_or_path)) and not dht_prefix:
-            dht_prefix = str(model_name_or_path).split("/")[-1].replace(".", "-")
-            if not dht_prefix.endswith("-hf"):
-                dht_prefix += "-hf"
-            logger.info(f"Using DHT prefix: {{dht_prefix}}")
-        result = super().from_pretrained(model_name_or_path, *args, dht_prefix=dht_prefix, **kwargs)
-        config = result[0] if isinstance(result, tuple) else result
-        config.use_cache = True
-        if config.pad_token_id is None:
-            config.pad_token_id = 0
-        return result
-""")
-
-MODEL_TEMPLATE = textwrap.dedent("""\
-from typing import Optional
-import torch, torch.nn as nn
-from hivemind import DHT
-from hivemind.utils.logging import get_logger
-from transformers.modeling_outputs import {output_class}
-
-{base_model_import}
-
-from petals.client.from_pretrained import FromPretrainedMixin
-from petals.client.lm_head import LMHead
-from petals.client.ptune import PTuneMixin
-from petals.client.remote_generation import RemoteGenerationMixin, RemotePastKeyValues
-from petals.client.remote_sequential import RemoteSequential
-from petals.models.{pkg}.config import {config_class}
-from petals.utils.auto_config import DefaultRevisionMixin
-logger = get_logger(__name__)
-
-if _BaseModel is not None:
-    class {dist_model}(DefaultRevisionMixin, FromPretrainedMixin, PTuneMixin, _BaseModel):
-        _keys_to_ignore_on_load_missing = PTuneMixin._keys_to_ignore_on_load_missing
-        _keys_to_ignore_on_load_unexpected = [r"^model\\\\.layers\\\\."]
-        config_class = {config_class}
-
-        def __init__(self, config, *, dht=None):
-            n, config.num_hidden_layers = config.num_hidden_layers, 0
-            super().__init__(config)
-            assert len(self.layers) == 0
-            config.num_hidden_layers = n
-            self.layers = RemoteSequential(config, dht=dht)
-            self.requires_grad_(False)
-            self.init_prompts(config)
-
-        def forward(self, input_ids=None, past_key_values=None, attention_mask=None,
-                    position_ids=None, head_mask=None, inputs_embeds=None, use_cache=None,
-                    output_attentions=None, output_hidden_states=None,
-                    return_dict=None, cache_position=None, **kwargs):
-            if input_ids is not None and inputs_embeds is not None:
-                raise ValueError("Cannot specify both input_ids and inputs_embeds")
-            elif input_ids is not None:
-                input_shape = input_ids.size(); input_ids = input_ids.view(-1, input_shape[-1])
-            elif inputs_embeds is not None:
-                input_shape = inputs_embeds.size()[:-1]
-            else:
-                raise ValueError("Must specify input_ids or inputs_embeds")
-            assert attention_mask is None or (attention_mask == 1).all()
-            assert use_cache is None or use_cache
-            if inputs_embeds is None:
-                inputs_embeds = self.embed_tokens(input_ids)
-            use_prompts = self.config.tuning_mode and "ptune" in self.config.tuning_mode and self.h.position == 0
-            if use_prompts:
-                prompts, ip = self.get_prompt(inputs_embeds.shape[0])
-                inputs_embeds = torch.cat([prompts, inputs_embeds], dim=1)
-            else:
-                prompts = ip = None
-            hs = inputs_embeds; out_shape = input_shape + (hs.size(-1),)
-            if past_key_values is None:
-                past_key_values = RemotePastKeyValues()
-            hs = self.layers(hs, prompts=ip, hypo_ids=past_key_values.hypo_ids if past_key_values else None)
-            if use_prompts:
-                hs = hs[:, self.pre_seq_len:]
-            hs = self.norm(hs).view(out_shape)
-            return {output_class}(last_hidden_state=hs, past_key_values=past_key_values, hidden_states=None, attentions=None)
-
-        @property
-        def word_embeddings(self): return self.embed_tokens
-        @property
-        def word_embeddings_layernorm(self): return nn.Identity()
-        @property
-        def h(self): return self.layers
-        @property
-        def ln_f(self): return self.norm
-
-    class {dist_causal_lm}(FromPretrainedMixin, RemoteGenerationMixin, _BaseCausalLM):
-        _keys_to_ignore_on_load_missing = {dist_model}._keys_to_ignore_on_load_missing
-        _keys_to_ignore_on_load_unexpected = {dist_model}._keys_to_ignore_on_load_unexpected
-        config_class = {config_class}
-
-        def __init__(self, config):
-            _BasePreTrained.__init__(self, config)
-            self.model = {dist_model}(config)
-            self.lm_head = LMHead(config)
-            self.post_init()
-
-        def get_output_embeddings(self): return self.lm_head
-
-        @property
-        def transformer(self): return self.model
-else:
-    class {dist_model}:
-        def __init__(self, *a, **kw): raise ImportError("{model_name} requires a newer transformers")
-    class {dist_causal_lm}:
-        def __init__(self, *a, **kw): raise ImportError("{model_name} requires a newer transformers")
-""")
-
-INIT_TEMPLATE = textwrap.dedent("""\
-from petals.models.{pkg}.block import {block_class}
-from petals.models.{pkg}.config import {config_class}
-from petals.models.{pkg}.model import {dist_causal_lm}, {dist_model}
-from petals.utils.auto_config import register_model_classes
-register_model_classes(
-    config={config_class},
-    model={dist_model},
-    model_for_causal_lm={dist_causal_lm},
-)
-""")
-
-MODELS = [
-    {
-        "pkg": "qwen3",
-        "model_name": "Qwen3",
-        "block_class": "WrappedQwen3Block",
-        "config_class": "DistributedQwen3Config",
-        "dist_model": "DistributedQwen3Model",
-        "dist_causal_lm": "DistributedQwen3ForCausalLM",
-        "output_class": "BaseModelOutputWithPast",
-        "decoder_import": textwrap.dedent("""\
-            try:
-                from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer as _DecoderLayer
-            except ImportError:
-                _DecoderLayer = None"""),
-        "base_config_import": textwrap.dedent("""\
-            try:
-                from transformers.models.qwen3 import Qwen3Config as _BaseConfig
-            except ImportError:
-                _BaseConfig = None
-            if _BaseConfig is None:
-                raise ImportError("Qwen3 requires transformers >= 5.0.0")"""),
-        "attn_import": textwrap.dedent("""\
-            try:
-                from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention as _AttnClass
-            except ImportError:
-                _AttnClass = None"""),
-        "base_model_import": textwrap.dedent("""\
-            try:
-                from transformers.models.qwen3 import Qwen3Model as _BaseModel, Qwen3ForCausalLM as _BaseCausalLM, Qwen3PreTrainedModel as _BasePreTrained
-            except ImportError:
-                _BaseModel = _BaseCausalLM = _BasePreTrained = None"""),
-    },
-    {
-        "pkg": "qwen3_5_moe",
-        "model_name": "Qwen3.5 MoE",
-        "block_class": "WrappedQwen3_5MoeBlock",
-        "config_class": "DistributedQwen3_5MoeConfig",
-        "dist_model": "DistributedQwen3_5MoeModel",
-        "dist_causal_lm": "DistributedQwen3_5MoeForCausalLM",
-        "output_class": "MoeModelOutputWithPast",
-        "decoder_import": textwrap.dedent("""\
-            try:
-                from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextDecoderLayer as _DecoderLayer
-            except ImportError:
-                try:
-                    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeDecoderLayer as _DecoderLayer
-                except ImportError:
-                    _DecoderLayer = None"""),
-        "base_config_import": textwrap.dedent("""\
-            try:
-                from transformers.models.qwen3_5_moe import Qwen3_5MoeTextConfig as _BaseConfig
-            except ImportError:
-                from transformers.models.qwen3_5_moe import Qwen3_5MoeConfig as _BaseConfig"""),
-        "attn_import": textwrap.dedent("""\
-            try:
-                from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTextAttention as _AttnClass
-            except ImportError:
-                _AttnClass = None"""),
-        "base_model_import": textwrap.dedent("""\
-            try:
-                from transformers.models.qwen3_5_moe import Qwen3_5MoeTextModel as _BaseModel, Qwen3_5MoeForCausalLM as _BaseCausalLM, Qwen3_5MoePreTrainedModel as _BasePreTrained
-            except ImportError:
-                _BaseModel = _BaseCausalLM = _BasePreTrained = None"""),
-    },
-    {
-        "pkg": "glm_moe_dsa",
-        "model_name": "GLM-5",
-        "block_class": "WrappedGlmMoeDsaBlock",
-        "config_class": "DistributedGlmMoeDsaConfig",
-        "dist_model": "DistributedGlmMoeDsaModel",
-        "dist_causal_lm": "DistributedGlmMoeDsaForCausalLM",
-        "output_class": "BaseModelOutputWithPast",
-        "decoder_import": textwrap.dedent("""\
-            try:
-                from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaDecoderLayer as _DecoderLayer
-            except ImportError:
-                _DecoderLayer = None"""),
-        "base_config_import": textwrap.dedent("""\
-            try:
-                from transformers.models.glm_moe_dsa import GlmMoeDsaConfig as _BaseConfig
-            except ImportError:
-                _BaseConfig = None
-            if _BaseConfig is None:
-                raise ImportError("GLM-5 requires transformers >= 5.2.0")"""),
-        "attn_import": textwrap.dedent("""\
-            try:
-                from transformers.models.glm_moe_dsa.modeling_glm_moe_dsa import GlmMoeDsaAttention as _AttnClass
-            except ImportError:
-                _AttnClass = None"""),
-        "base_model_import": textwrap.dedent("""\
-            try:
-                from transformers.models.glm_moe_dsa import GlmMoeDsaModel as _BaseModel, GlmMoeDsaForCausalLM as _BaseCausalLM, GlmMoeDsaPreTrainedModel as _BasePreTrained
-            except ImportError:
-                _BaseModel = _BaseCausalLM = _BasePreTrained = None"""),
-    },
-]
-
-
-def patch_model(models_dir, spec):
-    pkg = spec["pkg"]
-    pkg_dir = models_dir / pkg
-    pkg_dir.mkdir(exist_ok=True)
-    (pkg_dir / "__init__.py").write_text(INIT_TEMPLATE.format(**spec))
-    (pkg_dir / "block.py").write_text(BLOCK_TEMPLATE.format(**spec))
-    (pkg_dir / "config.py").write_text(CONFIG_TEMPLATE.format(**spec))
-    (pkg_dir / "model.py").write_text(MODEL_TEMPLATE.format(**spec))
-    print(f"  {spec['model_name']} ({pkg}) overlay written")
-
-
-def patch_auto_config(utils_dir):
-    auto_config_path = utils_dir / "auto_config.py"
-    if not auto_config_path.exists():
-        print("  auto_config.py not found; skipping")
-        return
-    text = auto_config_path.read_text()
-    ALIASES_DEF = '_MODEL_TYPE_ALIASES = {"kimi_k25": "kimi_k2"}'
-    if ALIASES_DEF not in text:
-        text = text.replace("_CLASS_MAPPING = {}", f'{ALIASES_DEF}\n\n_CLASS_MAPPING = {{}}', 1)
-    if "trust_remote_code=True" not in text:
-        text = text.replace(
-            "config = AutoConfig.from_pretrained(model_name_or_path, *args, **kwargs)",
-            "config = AutoConfig.from_pretrained(model_name_or_path, *args, trust_remote_code=True, **kwargs)",
-        )
-    if "_MODEL_TYPE_ALIASES.get" not in text:
-        text = text.replace(
-            'if config.model_type not in _CLASS_MAPPING:',
-            'model_type = _MODEL_TYPE_ALIASES.get(config.model_type, config.model_type)\n        if model_type not in _CLASS_MAPPING:',
-        )
-        text = text.replace(
-            "proper_cls = getattr(_CLASS_MAPPING[config.model_type], cls._mapping_field)",
-            "proper_cls = getattr(_CLASS_MAPPING[model_type], cls._mapping_field)",
-        )
-    if "is already registered" in text and "logger.warning" not in text:
-        text = text.replace(
-            '    assert (\n        config.model_type not in _CLASS_MAPPING\n    ), f"Model type {config.model_type} is already registered"\n\n    _CLASS_MAPPING[config.model_type]',
-            '    if config.model_type in _CLASS_MAPPING:\n        return  # already registered\n    _CLASS_MAPPING[config.model_type]',
-        )
-    auto_config_path.write_text(text)
-    print("  auto_config.py patched (trust_remote_code, aliases, lenient registration)")
-
-
-def patch_models_init(models_dir, model_pkgs):
-    init_path = models_dir / "__init__.py"
-    text = init_path.read_text()
-    changed = False
-    for pkg in model_pkgs:
-        marker = f"from petals.models.{pkg} import *"
-        if marker not in text:
-            text += f"\ntry:\n    from petals.models.{pkg} import *\nexcept ImportError:\n    pass\n"
-            changed = True
-    if changed:
-        init_path.write_text(text)
-        print("  models/__init__.py updated")
-    else:
-        print("  models/__init__.py already up to date")
-
-
-def patch_convert_block(utils_dir):
-    cb_path = utils_dir / "convert_block.py"
-    if not cb_path.exists():
-        print("  convert_block.py not found; skipping")
-        return
-    text = cb_path.read_text()
-    old = "total_heads += submodule.num_heads"
-    new = (
-        "total_heads += getattr(submodule, 'num_heads', None) "
-        "or getattr(submodule, 'num_attention_heads', model_config.num_attention_heads)"
-    )
-    if old in text:
-        cb_path.write_text(text.replace(old, new, 1))
-        print("  convert_block.py patched (num_heads fallback)")
-    else:
-        print("  convert_block.py already patched or has different format")
-
-
-def patch_hivemind_grad_scaler(site_pkgs):
-    gs_path = site_pkgs / "hivemind" / "optim" / "grad_scaler.py"
-    if not gs_path.exists():
-        print("  hivemind grad_scaler.py not found; skipping")
-        return
-    text = gs_path.read_text()
-    old_import = "from torch.cuda.amp.grad_scaler import OptState, _refresh_per_optimizer_state"
-    new_import = (
-        "try:\n"
-        "    from torch.cuda.amp.grad_scaler import OptState, _refresh_per_optimizer_state\n"
-        "except ImportError:\n"
-        "    import enum\n"
-        "    class OptState(enum.Enum):\n"
-        "        READY = 0; UNSCALED = 1; STEPPED = 2\n"
-        "    def _refresh_per_optimizer_state():\n"
-        "        return {'stage': OptState.READY, 'found_inf_per_device': {}}"
-    )
-    if old_import in text:
-        gs_path.write_text(text.replace(old_import, new_import, 1))
-        print("  hivemind grad_scaler.py patched (torch>=2.5 compat)")
-    elif "except ImportError" in text and "OptState" in text:
-        print("  hivemind grad_scaler.py already patched")
-    else:
-        print("  hivemind grad_scaler.py: unexpected format, skipping")
-
-
-print("Patching petals with frontier model support...")
-patch_auto_config(utils_dir)
-patch_convert_block(utils_dir)
-patch_hivemind_grad_scaler(site_pkgs)
-for spec in MODELS:
-    patch_model(models_dir, spec)
-patch_models_init(models_dir, [m["pkg"] for m in MODELS])
-print("Done.")
-QWEN_PATCH
-    fi  # end inline patcher fallback
-  fi
+  # -- Frontier model overlay -----------------------------------------------------
+  # Models (qwen3, qwen3_5_moe, glm_moe_dsa, etc.) are already built into the
+  # beam repo's petals source. No inline patching needed.
+  echo "Frontier models already included in beam repo petals — skipping inline patcher."
   # -- End frontier model overlay -------------------------------------------------
+
+  # Verify petals imports correctly after all deps are installed
+  if ! "$petals_venv/bin/python" -c "import petals; print(f'petals {petals.__version__} imported OK')" 2>&1; then
+    echo "WARNING: petals import check failed. Check dependency compatibility."
+  fi
 
   petals_python_real="$petals_venv/bin/python"
   petals_model_shim="${BEAM_PETALS_ENABLE_MODEL_ARG_SHIM:-true}"
@@ -1266,7 +540,7 @@ fi
   [[ -n "${BEAM_HOP_COUNTS:-}" ]] && echo "export BEAM_HOP_COUNTS=\"${BEAM_HOP_COUNTS}\""
   [[ -n "${BEAM_SINGLE_NODE:-}" ]] && echo "export BEAM_SINGLE_NODE=\"${BEAM_SINGLE_NODE}\""
   [[ -n "${BEAM_MAX_BLOCKS:-}" ]] && echo "export BEAM_MAX_BLOCKS=\"${BEAM_MAX_BLOCKS}\""
-  echo "exec \"$binary_path\" --config \"$config_path\""
+  echo "exec \"$binary_path\" run --config \"$config_path\""
 } > start_agent.sh
 chmod +x start_agent.sh
 

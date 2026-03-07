@@ -344,6 +344,72 @@ class WrappedKimiK2Block(nn.Module):
 
 MODELS = [
     {
+        "pkg": "llama",
+        "model_name": "LLaMA",
+        "block_class": "WrappedLlamaBlock",
+        "config_class": "DistributedLlamaConfig",
+        "dist_model": "DistributedLlamaModel",
+        "dist_causal_lm": "DistributedLlamaForCausalLM",
+        "output_class": "BaseModelOutputWithPast",
+        "decoder_import": textwrap.dedent("""\
+            try:
+                from transformers.models.llama.modeling_llama import LlamaDecoderLayer as _DecoderLayer
+            except ImportError:
+                _DecoderLayer = None"""),
+        "base_config_import": textwrap.dedent("""\
+            from transformers.models.llama import LlamaConfig as _BaseConfig"""),
+        "attn_import": "_AttnClass = None",
+        "base_model_import": textwrap.dedent("""\
+            try:
+                from transformers.models.llama import LlamaModel as _BaseModel, LlamaForCausalLM as _BaseCausalLM, LlamaPreTrainedModel as _BasePreTrained
+            except ImportError:
+                _BaseModel = _BaseCausalLM = _BasePreTrained = None"""),
+    },
+    {
+        "pkg": "mistral",
+        "model_name": "Mistral",
+        "block_class": "WrappedMistralBlock",
+        "config_class": "DistributedMistralConfig",
+        "dist_model": "DistributedMistralModel",
+        "dist_causal_lm": "DistributedMistralForCausalLM",
+        "output_class": "BaseModelOutputWithPast",
+        "decoder_import": textwrap.dedent("""\
+            try:
+                from transformers.models.mistral.modeling_mistral import MistralDecoderLayer as _DecoderLayer
+            except ImportError:
+                _DecoderLayer = None"""),
+        "base_config_import": textwrap.dedent("""\
+            from transformers.models.mistral import MistralConfig as _BaseConfig"""),
+        "attn_import": "_AttnClass = None",
+        "base_model_import": textwrap.dedent("""\
+            try:
+                from transformers.models.mistral import MistralModel as _BaseModel, MistralForCausalLM as _BaseCausalLM, MistralPreTrainedModel as _BasePreTrained
+            except ImportError:
+                _BaseModel = _BaseCausalLM = _BasePreTrained = None"""),
+    },
+    {
+        "pkg": "mixtral",
+        "model_name": "Mixtral",
+        "block_class": "WrappedMixtralBlock",
+        "config_class": "DistributedMixtralConfig",
+        "dist_model": "DistributedMixtralModel",
+        "dist_causal_lm": "DistributedMixtralForCausalLM",
+        "output_class": "MoeModelOutputWithPast",
+        "decoder_import": textwrap.dedent("""\
+            try:
+                from transformers.models.mixtral.modeling_mixtral import MixtralDecoderLayer as _DecoderLayer
+            except ImportError:
+                _DecoderLayer = None"""),
+        "base_config_import": textwrap.dedent("""\
+            from transformers.models.mixtral import MixtralConfig as _BaseConfig"""),
+        "attn_import": "_AttnClass = None",
+        "base_model_import": textwrap.dedent("""\
+            try:
+                from transformers.models.mixtral import MixtralModel as _BaseModel, MixtralForCausalLM as _BaseCausalLM, MixtralPreTrainedModel as _BasePreTrained
+            except ImportError:
+                _BaseModel = _BaseCausalLM = _BasePreTrained = None"""),
+    },
+    {
         "pkg": "qwen3",
         "model_name": "Qwen3",
         "block_class": "WrappedQwen3Block",
@@ -725,8 +791,9 @@ def main():
     # Kimi K2 uses trust_remote_code — handled separately with a composition wrapper.
     patch_kimi_k2(models_dir)
 
-    all_pkgs = [m["pkg"] for m in MODELS] + ["kimi_k2"]
-    patch_models_init(models_dir, all_pkgs)
+    # llama/mistral/mixtral are already in petals' __init__.py; only add new ones
+    new_pkgs = [m["pkg"] for m in MODELS if m["pkg"] not in ("llama", "mistral", "mixtral")] + ["kimi_k2"]
+    patch_models_init(models_dir, new_pkgs)
     print("Done.")
 
 
