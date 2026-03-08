@@ -337,6 +337,7 @@ PY
     "peft>=0.12.0" \
     "safetensors>=0.4.0" \
     "aiohttp" "pyyaml" \
+    "cpufeature" \
     "dijkstar>=2.6.0" \
     "async-timeout>=4.0" \
     "humanfriendly>=10.0" \
