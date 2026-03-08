@@ -133,9 +133,20 @@ def main():
 
             inputs = tokenizer(prompt, return_tensors="pt")
             input_ids = inputs["input_ids"]
+            attention_mask = inputs["attention_mask"]
+
+            # The Petals server rejects any single inference step where
+            # batch_size * seq_len > max_batch_size (8192 for MQA models).
+            # Truncate the prompt from the left (keep the most recent context)
+            # so the prefill step never exceeds that hard limit.
+            _max_prompt_tokens = max(1, 8192 - max_new_tokens)
+            if input_ids.shape[1] > _max_prompt_tokens:
+                input_ids = input_ids[:, -_max_prompt_tokens:]
+                attention_mask = attention_mask[:, -_max_prompt_tokens:]
 
             gen_kwargs = dict(
                 input_ids=input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
                 do_sample=do_sample,
             )
