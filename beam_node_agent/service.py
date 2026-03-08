@@ -980,7 +980,7 @@ class NodeAgent:
         modules — none of which are available inside the PyInstaller binary process.
         """
         prompt = self._format_messages(messages)
-        max_new_tokens = max_tokens if max_tokens and max_tokens > 0 else 256
+        max_new_tokens = min(max_tokens if max_tokens and max_tokens > 0 else 256, 64)
         temp_value = 1.0 if temperature is None else float(temperature)
 
         worker = self._ensure_inference_worker()
