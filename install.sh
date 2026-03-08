@@ -319,7 +319,7 @@ PY
   beam_repo_url="${BEAM_REPO_URL:-https://github.com/fuegocoding/beam.git}"
   beam_repo_ref="${BEAM_REPO_REF:-main}"
   echo "Installing petals from beam repo: $beam_repo_url @ $beam_repo_ref"
-  "$petals_venv/bin/python" -m pip install --no-deps \
+  "$petals_venv/bin/python" -m pip install --no-deps --no-cache-dir \
     "petals @ git+${beam_repo_url}@${beam_repo_ref}#subdirectory=engine"
 
   # Install all runtime deps at the correct versions (no stale pins from PyPI petals).
