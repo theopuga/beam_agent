@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # normally — no sys.path surgery, no C-extension conflicts.
 #
 # Protocol (newline-delimited JSON on stdin/stdout):
-#   stdin  ← {"job_id":…, "model_id":…, "prompt":…,
+#   stdin  ← {"job_id":…, "model_id":…, "messages":[…],
 #               "max_new_tokens":…, "temperature":…}
 #   stdout → {"type":"ready"}                          (once, at startup)
 #           → {"type":"token",  "job_id":…, "token":…} (per token)
@@ -117,6 +117,7 @@ def main():
 
         job_id = req.get("job_id", "")
         model_id = req.get("model_id", "")
+        messages = req.get("messages") or []
         prompt = req.get("prompt", "")
         max_new_tokens = int(req.get("max_new_tokens") or 256)
         temperature = float(req.get("temperature") or 1.0)
@@ -131,9 +132,18 @@ def main():
 
             import torch
 
-            inputs = tokenizer(prompt, return_tensors="pt")
-            input_ids = inputs["input_ids"]
-            attention_mask = inputs["attention_mask"]
+            # Use chat template when messages are provided (proper special tokens)
+            if messages and hasattr(tokenizer, "apply_chat_template"):
+                input_ids = tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                )
+                attention_mask = torch.ones_like(input_ids)
+            else:
+                inputs = tokenizer(prompt, return_tensors="pt")
+                input_ids = inputs["input_ids"]
+                attention_mask = inputs["attention_mask"]
 
             # The Petals server rejects any single inference step where
             # batch_size * seq_len > max_batch_size (8192 for MQA models).
@@ -299,7 +309,7 @@ class _InferenceSubprocess:
         self,
         job_id: str,
         model_id: str,
-        prompt: str,
+        messages: list,
         max_new_tokens: int,
         temperature: float,
     ) -> Iterator[dict]:
@@ -321,7 +331,7 @@ class _InferenceSubprocess:
             req = json.dumps({
                 "job_id": job_id,
                 "model_id": model_id,
-                "prompt": prompt,
+                "messages": messages,
                 "max_new_tokens": max_new_tokens,
                 "temperature": temperature,
             })
@@ -979,7 +989,6 @@ class NodeAgent:
         so it has full access to torch, cmath, and all other C-extension stdlib
         modules — none of which are available inside the PyInstaller binary process.
         """
-        prompt = self._format_messages(messages)
         max_new_tokens = min(max_tokens if max_tokens and max_tokens > 0 else 256, 64)
         temp_value = 1.0 if temperature is None else float(temperature)
 
@@ -992,7 +1001,7 @@ class NodeAgent:
                 for msg in worker.run_job(
                     job_id=job_id or "job",
                     model_id=model_id,
-                    prompt=prompt,
+                    messages=messages,
                     max_new_tokens=max_new_tokens,
                     temperature=temp_value,
                 ):
