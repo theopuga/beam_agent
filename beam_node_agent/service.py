@@ -136,26 +136,18 @@ def main():
 
             import torch
 
-            # Use chat template when messages are provided (proper special tokens)
-            # enable_thinking=False suppresses Qwen3's <think> reasoning blocks,
-            # which would otherwise consume most/all of max_new_tokens before
-            # producing a user-visible answer.
+            # Use chat template when messages are provided (proper special tokens).
+            # NOTE: We intentionally do NOT pass enable_thinking=False here.
+            # With Petals distributed inference, enable_thinking=False causes
+            # the model to emit a single special token and then immediately
+            # hit EOS, producing empty output.  Instead, we let the model
+            # think normally and strip <think>...</think> blocks post-hoc.
             if messages and hasattr(tokenizer, "apply_chat_template"):
-                template_kwargs = dict(
+                encoded = tokenizer.apply_chat_template(
+                    messages,
                     add_generation_prompt=True,
                     return_tensors="pt",
                 )
-                # Qwen3 chat templates accept enable_thinking to control
-                # whether the model emits <think>...</think> blocks.
-                try:
-                    encoded = tokenizer.apply_chat_template(
-                        messages, enable_thinking=False, **template_kwargs,
-                    )
-                except TypeError:
-                    # Tokenizer does not support enable_thinking kwarg
-                    encoded = tokenizer.apply_chat_template(
-                        messages, **template_kwargs,
-                    )
                 # apply_chat_template may return a bare tensor or a BatchEncoding
                 if isinstance(encoded, torch.Tensor):
                     input_ids = encoded
@@ -190,6 +182,14 @@ def main():
             if do_sample:
                 gen_kwargs["temperature"] = temperature
 
+            # Log the generation config for debugging early-stop issues
+            _eos = getattr(model.config, "eos_token_id", None)
+            _emit({"type": "log", "job_id": job_id,
+                   "message": f"gen_kwargs: max_new_tokens={max_new_tokens} "
+                              f"do_sample={do_sample} temperature={temperature} "
+                              f"eos_token_id={_eos} "
+                              f"input_ids_shape={tuple(input_ids.shape)}"})
+
             # Run generation synchronously.
             # NOTE: TextIteratorStreamer does not work reliably with
             # AutoDistributedModelForCausalLM because the distributed
@@ -200,6 +200,14 @@ def main():
             # Decode only the newly generated tokens (skip the prompt).
             prompt_len = input_ids.shape[-1]
             new_ids = output_ids[0, prompt_len:]
+
+            # Log the raw token IDs to diagnose early-stop / EOS issues
+            _new_ids_list = new_ids.tolist()
+            _raw_decode = tokenizer.decode(new_ids, skip_special_tokens=False)
+            _emit({"type": "log", "job_id": job_id,
+                   "message": f"raw new_ids={_new_ids_list[:20]} "
+                              f"raw_decode_with_special={_raw_decode[:200]!r}"})
+
             raw_text = tokenizer.decode(new_ids, skip_special_tokens=True)
 
             # Strip <think>...</think> reasoning blocks (Qwen3 thinking model).
