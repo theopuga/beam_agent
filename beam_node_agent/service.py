@@ -181,12 +181,15 @@ def main():
 
             # Decode the tokenized prompt back to text to verify chat template application
             _rendered_prompt = tokenizer.decode(input_ids[0], skip_special_tokens=False)
+            _has_think_in_prompt = "<think>" in _rendered_prompt or _rendered_prompt.rstrip().endswith("<think>")
             _emit({"type": "log", "job_id": job_id,
                    "message": f"tokenized: input_ids type={type(input_ids).__name__} "
                               f"shape={tuple(input_ids.shape)} "
                               f"attention_mask shape={tuple(attention_mask.shape)} "
-                              f"token_ids={input_ids[0].tolist()[:30]} "
-                              f"rendered_prompt={_rendered_prompt[:300]!r}"})
+                              f"token_ids_first30={input_ids[0].tolist()[:30]} "
+                              f"token_ids_last10={input_ids[0].tolist()[-10:]} "
+                              f"has_think_in_prompt={_has_think_in_prompt} "
+                              f"rendered_prompt={_rendered_prompt[:500]!r}"})
 
             # The Petals server rejects any single inference step where
             # batch_size * seq_len > max_batch_size (8192 for MQA models).
@@ -202,6 +205,7 @@ def main():
                 attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
                 do_sample=do_sample,
+                repetition_penalty=1.3,
             )
             if do_sample:
                 gen_kwargs["temperature"] = temperature
@@ -228,7 +232,30 @@ def main():
             # generate() implementation does not call streamer.put() per token.
             _t0 = time.time()
             with torch.no_grad():
-                output_ids = model.generate(**gen_kwargs)
+                try:
+                    _gen_out = model.generate(
+                        **gen_kwargs,
+                        return_dict_in_generate=True,
+                        output_scores=True,
+                    )
+                    output_ids = _gen_out.sequences
+                    # Log first-token logit distribution to diagnose attractor
+                    if _gen_out.scores:
+                        import torch as _torch
+                        _first_logits = _gen_out.scores[0][0]  # (vocab_size,)
+                        _top10 = _torch.topk(_first_logits, 10)
+                        _first_probs = _torch.softmax(_first_logits, dim=-1)
+                        _top10_probs = _first_probs[_top10.indices]
+                        _emit({"type": "log", "job_id": job_id,
+                               "message": (
+                                   f"FIRST_TOKEN_LOGITS top10_ids={_top10.indices.tolist()} "
+                                   f"top10_logits={[round(x, 3) for x in _top10.values.tolist()]} "
+                                   f"top10_probs={[round(x, 4) for x in _top10_probs.tolist()]} "
+                                   f"max_prob={_first_probs.max().item():.4f}"
+                               )})
+                except TypeError:
+                    # Fallback: model.generate() doesn't support output_scores
+                    output_ids = model.generate(**gen_kwargs)
             _elapsed = time.time() - _t0
             _n_new = output_ids.shape[1] - input_ids.shape[1]
             _tok_per_sec = _n_new / _elapsed if _elapsed > 0 else 0
