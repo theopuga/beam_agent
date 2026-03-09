@@ -49,14 +49,18 @@ def _emit(obj):
 def _load_model(model_id, peers, _dtype_map=None, _float16=None):
     # Load the distributed model and tokenizer; returns (model, tokenizer).
     #
-    # NOTE: Do NOT pass torch_dtype=float16 here.
     # The client model (AutoDistributedModelForCausalLM) runs the embedding
-    # layer and final ln_f on CPU in float32.  The remote transformer blocks
-    # run on the GPU server in float16 — that is controlled separately by the
-    # Petals server, not by this from_pretrained() call.
-    # Forcing float16 here causes:
-    #   RuntimeError: "LayerNormKernelImpl" not implemented for 'Half'
-    # because PyTorch's CPU LayerNorm kernel does not support float16.
+    # layer, final ln_f, and LM head on CPU.  The remote transformer blocks
+    # run on the GPU server in float16.
+    #
+    # We explicitly load in float32 because:
+    # 1. float16/bfloat16 LayerNorm is not supported on CPU
+    # 2. bfloat16 LM head on CPU without AVX512 triggers chunked_forward()
+    #    which is ~8-10x slower than plain float32 F.linear().
+    #    The LM head computes logits over the full vocab (151,936 for Qwen3)
+    #    every token — this dominates per-token latency when done in bf16
+    #    chunks on CPU.
+    import torch
     from petals import AutoDistributedModelForCausalLM
     from transformers import AutoTokenizer
 
@@ -67,6 +71,7 @@ def _load_model(model_id, peers, _dtype_map=None, _float16=None):
     model = AutoDistributedModelForCausalLM.from_pretrained(
         model_id,
         initial_peers=peers,
+        torch_dtype=torch.float32,
     )
     model.eval()
     return model, tokenizer
@@ -194,8 +199,17 @@ def main():
             # NOTE: TextIteratorStreamer does not work reliably with
             # AutoDistributedModelForCausalLM because the distributed
             # generate() implementation does not call streamer.put() per token.
+            _t0 = time.time()
             with torch.no_grad():
                 output_ids = model.generate(**gen_kwargs)
+            _elapsed = time.time() - _t0
+            _n_new = output_ids.shape[1] - input_ids.shape[1]
+            _tok_per_sec = _n_new / _elapsed if _elapsed > 0 else 0
+            _emit({"type": "log", "job_id": job_id,
+                   "message": f"generate wall_time={_elapsed:.1f}s "
+                              f"new_tokens={_n_new} "
+                              f"tok/s={_tok_per_sec:.2f} "
+                              f"lm_head_dtype={model.lm_head.weight.dtype}"})
 
             # Decode only the newly generated tokens (skip the prompt).
             prompt_len = input_ids.shape[-1]
