@@ -41,17 +41,45 @@ jobs:
           pip install pyinstaller aiohttp pyyaml "pydantic>=2.0"
           pip install -e .
 
+      - name: Verify package imports
+        run: |
+          python -c "from beam_node_agent.service import NodeAgent; print('service OK')"
+          python -c "from beam_node_agent.config import load_config; print('config OK')"
+          python -c "from beam_node_agent.petals_wrapper import PetalsWrapper; print('petals_wrapper OK')"
+          python -c "from beam_node_agent.node_identity import NodeIdentity; print('node_identity OK')"
+
       - name: Build binary
         run: |
           pyinstaller --onefile \
             --name ${{ matrix.artifact }} \
             --paths . \
+            --collect-all beam_node_agent \
+            --collect-all aiohttp \
+            --collect-all pydantic \
+            --collect-all yaml \
             --hidden-import beam_node_agent \
             --hidden-import beam_node_agent.config \
             --hidden-import beam_node_agent.service \
             --hidden-import beam_node_agent.petals_wrapper \
             --hidden-import beam_node_agent.node_identity \
             --hidden-import beam_node_agent.beam_node_agent \
+            --hidden-import aiohttp \
+            --hidden-import aiohttp.web \
+            --hidden-import aiohttp.web_app \
+            --hidden-import aiohttp.web_request \
+            --hidden-import aiohttp.web_response \
+            --hidden-import aiohttp.web_runner \
+            --hidden-import aiohttp.web_server \
+            --hidden-import aiohttp.client \
+            --hidden-import aiohttp.connector \
+            --hidden-import multidict \
+            --hidden-import yarl \
+            --hidden-import aiosignal \
+            --hidden-import frozenlist \
+            --hidden-import async_timeout \
+            --hidden-import pydantic \
+            --hidden-import pydantic.fields \
+            --hidden-import yaml \
             --hidden-import pdb \
             --hidden-import bdb \
             --hidden-import cmd \
