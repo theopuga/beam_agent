@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 #           → {"type":"done",   "job_id":…}            (end of job)
 #           → {"type":"error",  "job_id":…, "message":…, "traceback":…}
 # ---------------------------------------------------------------------------
-_INFERENCE_WORKER_SCRIPT = r"""
+_INFERENCE_WORKER_SCRIPT = r'''
 import json
 import os
 import re
@@ -255,7 +255,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-"""
+'''
 
 
 class _InferenceSubprocess:
