@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 _INFERENCE_WORKER_SCRIPT = r"""
 import json
 import os
+import re
 import sys
 import time
 
@@ -46,7 +47,20 @@ def _emit(obj):
     sys.stdout.flush()
 
 
-def _load_model(model_id, peers, _dtype_map=None, _float16=None):
+def _get_embed_weight(model):
+    """Get the embedding weight tensor, handling different model architectures."""
+    for attr in ("model", "transformer"):
+        sub = getattr(model, attr, None)
+        if sub is None:
+            continue
+        for emb_attr in ("embed_tokens", "word_embeddings", "wte"):
+            emb = getattr(sub, emb_attr, None)
+            if emb is not None and hasattr(emb, "weight"):
+                return emb.weight
+    return None
+
+
+def _load_model(model_id, peers):
     # Load the distributed model and tokenizer; returns (model, tokenizer).
     #
     # The client model (AutoDistributedModelForCausalLM) runs the embedding
@@ -57,9 +71,6 @@ def _load_model(model_id, peers, _dtype_map=None, _float16=None):
     # 1. float16/bfloat16 LayerNorm is not supported on CPU
     # 2. bfloat16 LM head on CPU without AVX512 triggers chunked_forward()
     #    which is ~8-10x slower than plain float32 F.linear().
-    #    The LM head computes logits over the full vocab (151,936 for Qwen3)
-    #    every token — this dominates per-token latency when done in bf16
-    #    chunks on CPU.
     import torch
     from petals import AutoDistributedModelForCausalLM
     from transformers import AutoTokenizer
@@ -89,9 +100,6 @@ def main():
         _initial_peers = json.loads(_peers_env) if _peers_env else None
     except Exception:
         _initial_peers = None
-
-    # Maximum seconds to wait for the first token before aborting.
-    _inference_timeout = int(os.environ.get("BEAM_INFERENCE_TIMEOUT", "120"))
 
     # Pre-warm: if BEAM_INFERENCE_WARMUP_MODEL is set, load the model immediately
     # so the first user request doesn't have to wait for disk I/O.
@@ -128,47 +136,35 @@ def main():
         temperature = float(req.get("temperature") or 1.0)
         do_sample = temperature > 0.0
 
-        # Log the full messages array for debugging prompt routing
-        _emit({"type": "log", "job_id": job_id,
-               "message": f"RECV job messages={json.dumps(messages)[:500]}"})
-
         try:
             if model is None or current_model_id != model_id:
                 from petals.constants import PUBLIC_INITIAL_PEERS
                 peers = _initial_peers if _initial_peers else PUBLIC_INITIAL_PEERS
-                model, tokenizer = _load_model(model_id, peers, None, None)
+                model, tokenizer = _load_model(model_id, peers)
                 current_model_id = model_id
 
-                # Diagnostic: verify client-side weights loaded correctly after every
-                # model load.  A near-zero lm_head norm means the weight was never
-                # loaded from the checkpoint and logits will be degenerate.
+                # Verify client-side weights loaded correctly.
                 _lm_w = model.lm_head.weight
-                _emb_w = model.model.embed_tokens.weight
-                _tied = _lm_w is _emb_w
+                _emb_w = _get_embed_weight(model)
                 _emit({"type": "log", "job_id": "",
                        "message": (
-                           f"MODEL LOAD DIAG: lm_head shape={tuple(_lm_w.shape)} "
+                           f"Model loaded: lm_head shape={tuple(_lm_w.shape)} "
                            f"dtype={_lm_w.dtype} norm={_lm_w.norm().item():.4f} "
-                           f"tied_to_embed={_tied} "
-                           f"embed_norm={_emb_w.norm().item():.4f} "
-                           f"norm_weight_norm={model.model.norm.weight.norm().item():.4f}"
+                           f"tied={_lm_w is _emb_w}"
                        )})
 
             import torch
 
-            # Use chat template when messages are provided (proper special tokens).
-            # NOTE: We intentionally do NOT pass enable_thinking=False here.
-            # With Petals distributed inference, enable_thinking=False causes
-            # the model to emit a single special token and then immediately
-            # hit EOS, producing empty output.  Instead, we let the model
-            # think normally and strip <think>...</think> blocks post-hoc.
+            # Use chat template when messages are provided.
+            # NOTE: We do NOT pass enable_thinking=False — with Petals
+            # distributed inference it causes empty output. Instead we
+            # strip <think>...</think> blocks post-hoc if present.
             if messages and hasattr(tokenizer, "apply_chat_template"):
                 encoded = tokenizer.apply_chat_template(
                     messages,
                     add_generation_prompt=True,
                     return_tensors="pt",
                 )
-                # apply_chat_template may return a bare tensor or a BatchEncoding
                 if isinstance(encoded, torch.Tensor):
                     input_ids = encoded
                 else:
@@ -179,22 +175,8 @@ def main():
                 input_ids = encoded["input_ids"]
                 attention_mask = encoded["attention_mask"]
 
-            # Decode the tokenized prompt back to text to verify chat template application
-            _rendered_prompt = tokenizer.decode(input_ids[0], skip_special_tokens=False)
-            _has_think_in_prompt = "<think>" in _rendered_prompt or _rendered_prompt.rstrip().endswith("<think>")
-            _emit({"type": "log", "job_id": job_id,
-                   "message": f"tokenized: input_ids type={type(input_ids).__name__} "
-                              f"shape={tuple(input_ids.shape)} "
-                              f"attention_mask shape={tuple(attention_mask.shape)} "
-                              f"token_ids_first30={input_ids[0].tolist()[:30]} "
-                              f"token_ids_last10={input_ids[0].tolist()[-10:]} "
-                              f"has_think_in_prompt={_has_think_in_prompt} "
-                              f"rendered_prompt={_rendered_prompt[:500]!r}"})
-
-            # The Petals server rejects any single inference step where
-            # batch_size * seq_len > max_batch_size (8192 for MQA models).
-            # Truncate the prompt from the left (keep the most recent context)
-            # so the prefill step never exceeds that hard limit.
+            # Truncate prompt from the left if it exceeds the server's
+            # max_batch_size limit (8192 tokens per inference step).
             _max_prompt_tokens = max(1, 8192 - max_new_tokens)
             if input_ids.shape[1] > _max_prompt_tokens:
                 input_ids = input_ids[:, -_max_prompt_tokens:]
@@ -210,26 +192,12 @@ def main():
             if do_sample:
                 gen_kwargs["temperature"] = temperature
 
-            # Log the generation config for debugging early-stop issues
-            _eos = getattr(model.config, "eos_token_id", None)
             _emit({"type": "log", "job_id": job_id,
-                   "message": f"gen_kwargs: max_new_tokens={max_new_tokens} "
-                              f"do_sample={do_sample} temperature={temperature} "
-                              f"eos_token_id={_eos} "
-                              f"input_ids_shape={tuple(input_ids.shape)}"})
+                   "message": f"Generating: input_len={input_ids.shape[1]} "
+                              f"max_new_tokens={max_new_tokens} temp={temperature}"})
 
-            # NOTE: Do NOT call model(input_ids=...) directly for diagnostics!
-            # model.forward() goes through rpc_forward → forward_pool, which is a
-            # completely different server path from model.generate() (rpc_inference
-            # → inference_pool).  Qwen3DecoderLayer returns 2D hidden states which
-            # the rpc_forward path doesn't handle, causing an assertion failure with
-            # exponential-backoff retries that block everything for minutes.
-            # Instead, inspect logits AFTER generation completes (see below).
-
-            # Run generation synchronously.
-            # NOTE: TextIteratorStreamer does not work reliably with
-            # AutoDistributedModelForCausalLM because the distributed
-            # generate() implementation does not call streamer.put() per token.
+            # NOTE: Do NOT call model(input_ids=...) directly — use generate().
+            # model.forward() uses rpc_forward which is a different server path.
             _t0 = time.time()
             with torch.no_grad():
                 try:
@@ -239,101 +207,30 @@ def main():
                         output_scores=True,
                     )
                     output_ids = _gen_out.sequences
-                    # Log first-token logit distribution to diagnose attractor
-                    if _gen_out.scores:
-                        import torch as _torch
-                        _first_logits = _gen_out.scores[0][0]  # (vocab_size,)
-                        _top10 = _torch.topk(_first_logits, 10)
-                        _first_probs = _torch.softmax(_first_logits, dim=-1)
-                        _top10_probs = _first_probs[_top10.indices]
-                        _emit({"type": "log", "job_id": job_id,
-                               "message": (
-                                   f"FIRST_TOKEN_LOGITS top10_ids={_top10.indices.tolist()} "
-                                   f"top10_logits={[round(x, 3) for x in _top10.values.tolist()]} "
-                                   f"top10_probs={[round(x, 4) for x in _top10_probs.tolist()]} "
-                                   f"max_prob={_first_probs.max().item():.4f}"
-                               )})
                 except TypeError:
-                    # Fallback: model.generate() doesn't support output_scores
                     output_ids = model.generate(**gen_kwargs)
             _elapsed = time.time() - _t0
             _n_new = output_ids.shape[1] - input_ids.shape[1]
             _tok_per_sec = _n_new / _elapsed if _elapsed > 0 else 0
             _emit({"type": "log", "job_id": job_id,
-                   "message": f"generate wall_time={_elapsed:.1f}s "
-                              f"new_tokens={_n_new} "
-                              f"tok/s={_tok_per_sec:.2f} "
-                              f"lm_head_dtype={model.lm_head.weight.dtype}"})
+                   "message": f"Generated {_n_new} tokens in {_elapsed:.1f}s "
+                              f"({_tok_per_sec:.1f} tok/s)"})
 
             # Decode only the newly generated tokens (skip the prompt).
             prompt_len = input_ids.shape[-1]
             new_ids = output_ids[0, prompt_len:]
-
-            # Log the raw token IDs to diagnose early-stop / EOS issues
-            _new_ids_list = new_ids.tolist()
-            _raw_decode = tokenizer.decode(new_ids, skip_special_tokens=False)
-            _emit({"type": "log", "job_id": job_id,
-                   "message": f"raw new_ids={_new_ids_list[:20]} "
-                              f"raw_decode_with_special={_raw_decode[:200]!r}"})
-
-            # Post-generation logits diagnostic: inspect what the model
-            # "wanted" to generate as the first token by looking at the
-            # generate() output.  We re-run just the local LM head on the
-            # last hidden state (no RPC needed) to check the logit distribution.
-            # This tells us if the remote blocks returned garbage hidden states.
-            _unique_ids = set(_new_ids_list[:50])
-            _is_degenerate = len(_unique_ids) <= 3 and _n_new > 10
-            if _is_degenerate:
-                _lm_w = model.lm_head.weight
-                _emb_w = model.model.embed_tokens.weight
-                _tied = _lm_w is _emb_w
-                _row_norms = _lm_w.norm(dim=1)
-                _avg_row_norm = _row_norms.mean().item()
-                # Report stats for each repeated token id
-                _dedup_ids = list(_unique_ids)
-                _row_stats = {
-                    tid: {
-                        "norm": _row_norms[tid].item(),
-                        "rank_by_norm": int((_row_norms > _row_norms[tid]).sum().item()),
-                    }
-                    for tid in _dedup_ids if tid < _lm_w.shape[0]
-                }
-                _emit({"type": "log", "job_id": job_id,
-                       "message": (
-                           f"DIAG degenerate output detected: "
-                           f"unique_ids_in_first_50={_unique_ids} "
-                           f"lm_head_weight_dtype={_lm_w.dtype} "
-                           f"lm_head_norm={_lm_w.norm().item():.4f} "
-                           f"avg_row_norm={_avg_row_norm:.4f} "
-                           f"repeated_token_row_stats={_row_stats} "
-                           f"lm_head_tied_to_embed={_tied} "
-                           f"embed_dtype={_emb_w.dtype} "
-                           f"norm_dtype={model.model.norm.weight.dtype}"
-                       )})
-
             raw_text = tokenizer.decode(new_ids, skip_special_tokens=True)
 
-            # Strip <think>...</think> reasoning blocks (Qwen3 thinking model).
-            import re
-            # Remove complete <think>...</think> blocks
+            # Strip <think>...</think> reasoning blocks if present
+            # (used by thinking models like Qwen3, etc.).
             text = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
-            # If generation cut off mid-think (no closing </think>), remove the
-            # incomplete block entirely.
             if "<think>" in text:
                 text = text[:text.index("<think>")].strip()
 
-            _emit({"type": "log", "job_id": job_id,
-                   "message": f"generate done: output_ids={tuple(output_ids.shape)} "
-                              f"prompt_len={prompt_len} new_tokens={len(new_ids)} "
-                              f"raw_len={len(raw_text)} cleaned_len={len(text)} "
-                              f"raw_preview={raw_text[:200]!r} "
-                              f"clean_preview={text[:200]!r}"})
-
-            if not text:
+            if not text and raw_text.strip():
                 _emit({"type": "log", "job_id": job_id,
-                       "message": "WARNING: cleaned text is empty after stripping "
-                                  "<think> blocks. Model may need more max_new_tokens "
-                                  "to finish reasoning and produce an answer."})
+                       "message": "Output empty after stripping <think> blocks. "
+                                  "Model may need more max_new_tokens."})
 
             # Emit one chunk at a time so the frontend streams word-by-word.
             words = text.split(" ") if text else []
@@ -346,7 +243,6 @@ def main():
 
         except Exception as exc:
             import traceback as _tb
-            # Reset the cached model if it may be in a bad state after an error.
             model = None
             current_model_id = None
             _emit({
