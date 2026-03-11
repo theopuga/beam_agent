@@ -17,7 +17,28 @@ Public installer scripts and release binaries for the Beam Node Agent — the pr
 
 ## Quick Start
 
-### Linux / macOS
+### Single-Node Mode (Ollama) — RunPod / any Linux GPU box
+
+Runs the full model on one machine via Ollama. Requires a GPU with enough VRAM for the model (e.g. RTX 4090 24GB for Qwen3.5-35B-A3B).
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/beam-open-node/beam_agent/feat/ollama-single-node/setup_runpod.sh | bash
+```
+
+This will:
+1. Install Ollama and pull the model (~16.5GB, stored on `/workspace` if available)
+2. Clone this branch and set up the Python environment
+3. Write `config.yaml` and `start_agent.sh`
+4. Print a **6-digit pair code** — enter it in the Rent Panel at [openbeam.me](https://www.openbeam.me)
+
+To restart after a pod reboot:
+```bash
+cd beam_agent && bash start_agent.sh
+```
+
+---
+
+### Multi-Node Mode (Petals) — Linux / macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/beam-open-node/beam_agent/main/install.sh -o install.sh
@@ -56,10 +77,14 @@ Override any config value with an environment variable. The most common ones:
 | Variable | Description | Default |
 |---|---|---|
 | `BEAM_CONTROL_PLANE_URL` | Control plane server URL | `https://www.openbeam.me` |
+| `BEAM_OLLAMA_URL` | Ollama API base URL (single-node mode) | `http://localhost:11434` |
+| `BEAM_OLLAMA_MODEL` | Ollama model tag to serve | `qwen3.5:35b-a3b` |
+| `BEAM_GPU_NAME` | GPU name reported to control plane (auto-detected via nvidia-smi) | — |
+| `BEAM_GPU_VRAM_GB` | GPU VRAM in GB (auto-detected) | — |
+| `BEAM_GPU_COUNT` | Number of GPUs (auto-detected) | — |
 | `BEAM_PETALS_PYTHON` | Python interpreter with Petals installed | System Python |
 | `BEAM_PAIRING_TOKEN` | Pre-set pairing token (skips interactive pairing) | — |
 | `BEAM_MOCK_INFERENCE` | `true` to run without a real GPU | `false` |
-| `BEAM_SINGLE_NODE` | Enable single-node mode | `false` |
 | `BEAM_MAX_BLOCKS` | Max transformer blocks to serve | — |
 
 Full list → [docs/node-agent-setup.md](docs/node-agent-setup.md#environment-variables)
