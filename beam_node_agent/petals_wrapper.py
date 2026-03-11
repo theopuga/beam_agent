@@ -125,11 +125,9 @@ class PetalsWrapper:
             "float16",  # Default optimization
         ]
 
-        # If the backend provided explicit DHT bootstrap peers, pass them so the
-        # petals server joins the beam private swarm instead of the public one.
-        # Also skip the reachability check — it creates a throwaway DHT client
-        # that hard-fails if any bootstrap peer is temporarily unreachable,
-        # and it's not useful for small private swarms anyway.
+        # If the control plane provided DHT bootstrap peers (Beam's private
+        # bootstrap node), use them so nodes join the Beam-only swarm.
+        # Without this, Petals falls back to PUBLIC_INITIAL_PEERS (public swarm).
         if initial_peers:
             cmd.extend(["--initial_peers"] + list(initial_peers))
             cmd.append("--skip_reachability_check")
