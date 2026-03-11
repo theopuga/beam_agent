@@ -21,7 +21,7 @@ fi
 if [ -n "$BEAM_GPU_VRAM_GB" ]; then
     GPU_VRAM="$BEAM_GPU_VRAM_GB"
 elif command -v nvidia-smi &> /dev/null; then
-    GPU_VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader | head -1 | awk '{printf "%d", $1/1024}')
+    GPU_VRAM=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader | awk '{sum += $1} END {printf "%d", sum/1024}')
 else
     GPU_VRAM="0"
 fi

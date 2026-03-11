@@ -584,7 +584,16 @@ class NodeAgent:
 
         try:
             # Detect GPU using a subprocess (torch optional — may not be installed in Ollama mode).
-            script = "import torch; print(f'{torch.cuda.device_count()}|{torch.cuda.get_device_properties(0).name}|{torch.cuda.get_device_properties(0).total_memory}') if torch.cuda.is_available() else print('0||0')"
+            script = (
+                "import torch\n"
+                "if torch.cuda.is_available():\n"
+                "    n = torch.cuda.device_count()\n"
+                "    name = torch.cuda.get_device_properties(0).name if n > 0 else ''\n"
+                "    total = sum(torch.cuda.get_device_properties(i).total_memory for i in range(n))\n"
+                "    print(f'{n}|{name}|{total}')\n"
+                "else:\n"
+                "    print('0||0')\n"
+            )
             result = (
                 subprocess.check_output([sys.executable, "-c", script], text=True)
                 .strip()
