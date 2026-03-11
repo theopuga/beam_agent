@@ -33,7 +33,7 @@ elif command -v nvidia-smi &> /dev/null; then
 else
     GPU_COUNT="1"
 fi
-BRANCH="feat/ollama-single-node"
+BRANCH="main"
 REPO="https://github.com/beam-open-node/beam_agent"
 
 echo "=== Beam Node Agent Setup ==="
