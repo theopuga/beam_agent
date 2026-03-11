@@ -64,7 +64,7 @@ def main():
 
         job_id = req.get("job_id", "")
         messages = req.get("messages") or []
-        max_new_tokens = int(req.get("max_new_tokens") or 256)
+        max_new_tokens = int(req.get("max_tokens") or req.get("max_new_tokens") or 256)
         temperature = float(req.get("temperature") or 1.0)
 
         try:
