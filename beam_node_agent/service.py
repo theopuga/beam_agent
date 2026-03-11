@@ -1390,12 +1390,30 @@ class NodeAgent:
             else None
         )
 
-        changed = (
+        # Only restart Petals when the model or block range actually changes.
+        # Peer list changes should NOT trigger a restart — peers are only needed
+        # for initial DHT bootstrap and the DHT handles dynamic discovery after
+        # that.  Restarting on peer changes causes an infinite loop: node A
+        # restarts → new P2P identity → node B sees changed peer → restarts →
+        # new P2P identity → node A sees changed peer → …
+        assignment_changed = (
             new_mid != current_mid
             or new_range != current_range
-            or sorted(new_peers or []) != sorted(current_peers or [])
         )
-        if changed:
+        peers_changed = sorted(new_peers or []) != sorted(current_peers or [])
+
+        # Always keep the latest peer list cached so a future Petals restart
+        # (e.g. crash recovery) uses the freshest peers.
+        if peers_changed and not assignment_changed:
+            if self.current_assignment:
+                self.current_assignment["initial_peers"] = new_peers
+            log.debug(
+                "Peer list updated (peers=%d) but assignment unchanged — "
+                "not restarting Petals.",
+                len(new_peers or []),
+            )
+
+        if assignment_changed:
             log.info(f"New assignment received: {new_mid} blocks {new_range} peers={len(new_peers or [])}")
 
             self.current_assignment = {
