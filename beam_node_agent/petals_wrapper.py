@@ -47,17 +47,11 @@ class PetalsWrapper:
                 log.info("Petals %s: %s", label, message)
                 # Extract local P2P multiaddrs from "Running a server on [...]"
                 if "Running a server on" in message and not self._local_p2p_addrs:
-                    match = re.search(r"\[(.+)\]", message)
-                    if match:
-                        raw = match.group(1)
-                        addrs = [
-                            a.strip().strip("'\"")
-                            for a in raw.split(",")
-                            if "/p2p/" in a
-                        ]
-                        if addrs:
-                            self._local_p2p_addrs = addrs
-                            log.info("Extracted local P2P addrs: %s", addrs)
+                    # Extract all multiaddr strings (start with /) from the log line
+                    addrs = re.findall(r"(/ip[46]/[^\s'\",\]]+)", message)
+                    if addrs:
+                        self._local_p2p_addrs = addrs
+                        log.info("Extracted local P2P addrs: %s", addrs)
         except Exception as exc:
             log.warning("Petals %s log stream error: %s", label, exc)
 
@@ -163,8 +157,15 @@ class PetalsWrapper:
         return self.process is not None and self.process.poll() is None
 
     def local_p2p_addrs(self) -> List[str]:
-        """Return the local Petals server's P2P multiaddrs (extracted from logs)."""
-        return list(self._local_p2p_addrs)
+        """Return the local Petals server's P2P multiaddrs (extracted from logs).
+
+        Loopback addresses (127.x.x.x, ::1) are excluded since they are
+        not useful for peer discovery across machines.
+        """
+        return [
+            a for a in self._local_p2p_addrs
+            if not a.startswith("/ip4/127.") and not a.startswith("/ip6/::1/")
+        ]
 
     def get_logs(self) -> str:
         # TODO: Implement log tailing from the PIPE or log file
