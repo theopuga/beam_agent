@@ -89,7 +89,7 @@ cd beam_agent
 echo ">>> Setting up Python environment..."
 python3 -m venv venv
 source venv/bin/activate
-pip install -q aiohttp aiohttp-socks pyyaml "pydantic>=2.0" "cryptography>=42.0.0"
+pip install -q aiohttp aiohttp-socks pyyaml "pydantic>=2.0" "cryptography>=42.0.0" faster-whisper
 
 # 7. Write config.yaml
 echo ">>> Writing config.yaml..."
