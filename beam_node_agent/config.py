@@ -33,6 +33,11 @@ class TorConfig(BaseModel):
     bootstrap_timeout: float = 90.0
 
 
+class E2EEncryptionConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    enabled: bool = False
+
+
 class AgentConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     heartbeat_interval_sec: int = 15
@@ -44,6 +49,7 @@ class AgentConfig(BaseModel):
     pairing_token: Optional[str] = None
     pairing_host: str = "0.0.0.0"
     pairing_ports: List[int] = Field(default_factory=lambda: [51337, 51338, 51339, 51340])
+    e2e_encryption: E2EEncryptionConfig = Field(default_factory=E2EEncryptionConfig)
     mock_inference: bool = False
     capabilities: Dict[str, object] = Field(
         default_factory=lambda: {
@@ -119,6 +125,13 @@ def load_config(config_path: str = "config.yaml") -> BeamConfig:
         tor_data["binary"] = os.environ["BEAM_TOR_BINARY"]
     if tor_data:
         agent_data["tor"] = tor_data
+
+    # E2E encryption config from env vars
+    e2e_data = agent_data.get("e2e_encryption", {})
+    if os.environ.get("BEAM_E2E_ENCRYPTION", "").lower() in ("true", "1"):
+        e2e_data["enabled"] = True
+    if e2e_data:
+        agent_data["e2e_encryption"] = e2e_data
 
     if "BEAM_MOCK_INFERENCE" in os.environ:
         agent_data["mock_inference"] = (
