@@ -113,6 +113,7 @@ agent:
   capabilities:
     supports_heavy_middle_layers: false
     max_concurrent_jobs: 1
+    max_model_class: "P"
     preferred_model_id: "Microsoft/Phi-4-Mini-Ollama"
 EOF
 

@@ -256,7 +256,8 @@ All error responses follow this format:
 
 | Class | Description | Status | Example |
 |---|---|---|---|
-| S (Single-node) | Full model served via Ollama on one machine | **Active** | Qwen 3.5 35B-A3B, Phi-4 Mini |
+| S (Single-node) | Full model served via Ollama on one machine | **Active** | Qwen 3.5 35B-A3B |
+| P (Phi) | Lightweight model served via Ollama on one machine | **Active** | Phi-4 Mini |
 | A (Light) | 7-8B parameters, single-node or short chain | Reserved / Future | — |
 | B (Large) | 13-30B parameters, multi-node chain | Reserved / Future | — |
 | C (Heavy) | 30-100B+ parameters, distributed inference | Reserved / Future | DeepSeek V3, large MoE |

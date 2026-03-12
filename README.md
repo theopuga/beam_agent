@@ -52,7 +52,7 @@ cd beam_agent && bash start_agent.sh
 | Model | Parameters | Active Params | VRAM | Class |
 |---|---|---|---|---|
 | Qwen 3.5 35B-A3B | 35 B (MoE) | ~3 B | ~20 GB | S |
-| Phi-4 Mini | 3.8 B | 3.8 B | ~2.5 GB | S |
+| Phi-4 Mini | 3.8 B | 3.8 B | ~2.5 GB | P |
 
 Coming soon: Kimi K2.5, GLM-5 (reserved, not yet available).
 
