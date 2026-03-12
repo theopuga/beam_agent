@@ -42,9 +42,9 @@ echo "Model: $OLLAMA_MODEL"
 echo "GPU: $GPU_NAME (${GPU_VRAM}GB x${GPU_COUNT})"
 echo ""
 
-# 1. Install system dependencies
+# 1. Install system dependencies (including Tor for onion routing support)
 echo ">>> Installing system dependencies..."
-apt-get update -qq && apt-get install -y -qq curl git zstd pciutils
+apt-get update -qq && apt-get install -y -qq curl git zstd pciutils tor
 
 # 2. Install Ollama
 # Always run the Ollama installer — it's idempotent and ensures GPU support
@@ -108,6 +108,8 @@ agent:
     - 51338
     - 51339
     - 51340
+  tor:
+    enabled: true
   capabilities:
     supports_heavy_middle_layers: false
     max_concurrent_jobs: 1

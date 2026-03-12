@@ -20,6 +20,17 @@ agent:
     - 51338
     - 51339
     - 51340
+  # Tor / onion routing (optional)
+  # When enabled, the agent starts a local Tor daemon, exposes the pairing
+  # server as a .onion hidden service, and opens a second WebSocket to the
+  # gateway routed through Tor's SOCKS5 proxy.
+  tor:
+    enabled: true
+    # socks_port: 9050
+    # data_dir: "tor_data"
+    # binary: "/usr/bin/tor"          # auto-detected if omitted
+    # bootstrap_timeout: 90.0
+  # onion_address is auto-populated when tor.enabled is true
   # onion_address: "abc123.onion"
   capabilities:
     supports_heavy_middle_layers: true

@@ -40,6 +40,36 @@ case "$os" in
     ;;
 esac
 
+# Install Tor for onion routing support
+if ! command -v tor >/dev/null 2>&1; then
+  echo "Installing Tor for onion routing support..."
+  case "$os" in
+    Linux*)
+      if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq && sudo apt-get install -y -qq tor
+      elif command -v yum >/dev/null 2>&1; then
+        sudo yum install -y tor
+      elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm tor
+      else
+        echo "WARNING: Could not auto-install Tor. Please install it manually for onion routing support."
+      fi
+      ;;
+    Darwin*)
+      if command -v brew >/dev/null 2>&1; then
+        brew install tor
+      else
+        echo "WARNING: Homebrew not found. Please install Tor manually for onion routing support."
+      fi
+      ;;
+  esac
+  if command -v tor >/dev/null 2>&1; then
+    echo "Tor installed successfully."
+  fi
+else
+  echo "Tor already installed."
+fi
+
 binary_path="./$asset_name"
 download_url="$release_base/$asset_name"
 
@@ -167,6 +197,8 @@ agent:
     - 51338
     - 51339
     - 51340
+  tor:
+    enabled: true
   capabilities:
     supports_heavy_middle_layers: true
     max_concurrent_jobs: 1
@@ -195,6 +227,8 @@ agent:
     - 51338
     - 51339
     - 51340
+  tor:
+    enabled: true
   capabilities:
     supports_heavy_middle_layers: true
     max_concurrent_jobs: 1

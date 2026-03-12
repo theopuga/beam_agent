@@ -24,6 +24,15 @@ class OllamaConfig(BaseModel):
     model_tag: str = Field(default="qwen3.5:35b-a3b", alias="BEAM_OLLAMA_MODEL")
 
 
+class TorConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    enabled: bool = True
+    socks_port: int = 9050
+    data_dir: str = "tor_data"
+    binary: Optional[str] = None
+    bootstrap_timeout: float = 90.0
+
+
 class AgentConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     heartbeat_interval_sec: int = 15
@@ -31,6 +40,7 @@ class AgentConfig(BaseModel):
     state_file: str = "node_state.json"
     transports: List[str] = Field(default_factory=lambda: ["fast"])
     onion_address: Optional[str] = None
+    tor: TorConfig = Field(default_factory=TorConfig)
     pairing_token: Optional[str] = None
     pairing_host: str = "0.0.0.0"
     pairing_ports: List[int] = Field(default_factory=lambda: [51337, 51338, 51339, 51340])
@@ -97,6 +107,19 @@ def load_config(config_path: str = "config.yaml") -> BeamConfig:
                 ports.append(int(value))
         if ports:
             agent_data["pairing_ports"] = ports
+    # Tor config from env vars
+    tor_data = agent_data.get("tor", {})
+    if os.environ.get("BEAM_TOR_ENABLED", "").lower() == "true":
+        tor_data["enabled"] = True
+    if os.environ.get("BEAM_TOR_SOCKS_PORT", "").strip():
+        tor_data["socks_port"] = int(os.environ["BEAM_TOR_SOCKS_PORT"])
+    if os.environ.get("BEAM_TOR_DATA_DIR", "").strip():
+        tor_data["data_dir"] = os.environ["BEAM_TOR_DATA_DIR"]
+    if os.environ.get("BEAM_TOR_BINARY", "").strip():
+        tor_data["binary"] = os.environ["BEAM_TOR_BINARY"]
+    if tor_data:
+        agent_data["tor"] = tor_data
+
     if "BEAM_MOCK_INFERENCE" in os.environ:
         agent_data["mock_inference"] = (
             os.environ["BEAM_MOCK_INFERENCE"].lower() == "true"

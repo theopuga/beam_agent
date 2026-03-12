@@ -20,6 +20,27 @@ $releaseBase = Read-Host "Release base URL [$releaseBaseDefault]"
 if ([string]::IsNullOrWhiteSpace($releaseBase)) { $releaseBase = $releaseBaseDefault }
 $releaseBase = $releaseBase.TrimEnd("/")
 
+# Install Tor for onion routing support
+$torPath = Get-Command tor -ErrorAction SilentlyContinue
+if (-not $torPath) {
+  Write-Host "Installing Tor for onion routing support..."
+  $chocoPath = Get-Command choco -ErrorAction SilentlyContinue
+  $wingetPath = Get-Command winget -ErrorAction SilentlyContinue
+  if ($chocoPath) {
+    choco install tor -y
+  } elseif ($wingetPath) {
+    winget install --id TorProject.TorExpertBundle --accept-package-agreements --accept-source-agreements
+  } else {
+    Write-Host "WARNING: Neither choco nor winget found. Please install Tor manually for onion routing support."
+    Write-Host "Download from: https://www.torproject.org/download/tor/"
+  }
+  if (Get-Command tor -ErrorAction SilentlyContinue) {
+    Write-Host "Tor installed successfully."
+  }
+} else {
+  Write-Host "Tor already installed."
+}
+
 $assetName = "beam-node-agent-windows.exe"
 $binaryPath = ".\$assetName"
 $downloadUrl = "$releaseBase/$assetName"
@@ -68,6 +89,8 @@ agent:
     - 51338
     - 51339
     - 51340
+  tor:
+    enabled: true
   capabilities:
     supports_heavy_middle_layers: true
     max_concurrent_jobs: 1
@@ -96,6 +119,8 @@ agent:
     - 51338
     - 51339
     - 51340
+  tor:
+    enabled: true
   capabilities:
     supports_heavy_middle_layers: true
     max_concurrent_jobs: 1

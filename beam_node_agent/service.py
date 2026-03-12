@@ -15,6 +15,7 @@ from aiohttp import web
 from beam_node_agent.config import BeamConfig
 from beam_node_agent.node_identity import NodeIdentity
 from beam_node_agent.ollama_wrapper import OllamaWrapper
+from beam_node_agent.tor_manager import TorManager, TorStartupError
 
 log = logging.getLogger(__name__)
 
@@ -325,12 +326,27 @@ class NodeAgent:
         # Persistent inference worker subprocess (uses BEAM_PETALS_PYTHON)
         self._inference_worker: Optional[_InferenceSubprocess] = None
         self._inference_worker_script: Optional[str] = None
+        # Tor support
+        self._tor_manager: Optional[TorManager] = None
+        self._tor_session: Optional[aiohttp.ClientSession] = None
+        self._tor_ws_task: Optional[asyncio.Task] = None
 
     async def start(self):
         log.info("Starting Beam Node Agent...")
         log.info("Control plane URL: %s", self.config.control_plane.url)
+
+        # Start Tor if enabled — must happen before registration so we have
+        # the .onion address and SOCKS proxy ready.
+        if self.config.agent.tor.enabled:
+            await self._start_tor()
+
         self.session = aiohttp.ClientSession()
         self._ws_task = asyncio.create_task(self._run_gateway_ws())
+
+        # If Tor is active, start a second WebSocket loop through the SOCKS proxy
+        if self._tor_manager and self._tor_manager.onion_address:
+            await self._start_tor_ws()
+
         await self._start_pairing_server()
         await self._start_remote_pairing_session()
 
@@ -373,6 +389,13 @@ class NodeAgent:
 
     async def stop(self):
         log.info("Shutting down...")
+        if self._tor_ws_task:
+            self._tor_ws_task.cancel()
+            try:
+                await self._tor_ws_task
+            except asyncio.CancelledError:
+                pass
+            self._tor_ws_task = None
         if self._ws_task:
             self._ws_task.cancel()
             try:
@@ -385,6 +408,12 @@ class NodeAgent:
             self._petals_check_task = None
         await self._stop_pairing_server()
         self.petals.stop()
+        if self._tor_session:
+            await self._tor_session.close()
+            self._tor_session = None
+        if self._tor_manager:
+            await self._tor_manager.stop()
+            self._tor_manager = None
         if self.session:
             await self.session.close()
 
@@ -647,10 +676,53 @@ class NodeAgent:
             ws_base = base
         return f"{ws_base}/api/v1/beam/agents/ws"
 
-    async def _run_gateway_ws(self):
+    # ------------------------------------------------------------------
+    # Tor integration
+    # ------------------------------------------------------------------
+
+    async def _start_tor(self) -> None:
+        """Initialize and start the Tor hidden service."""
+        tor_cfg = self.config.agent.tor
+        self._tor_manager = TorManager(
+            data_dir=tor_cfg.data_dir,
+            socks_port=tor_cfg.socks_port,
+            hidden_service_port=(self.config.agent.pairing_ports or [51337])[0],
+            tor_binary=tor_cfg.binary,
+            bootstrap_timeout=tor_cfg.bootstrap_timeout,
+        )
+        try:
+            onion = await self._tor_manager.start()
+            self.config.agent.onion_address = onion
+            if "onion" not in self.config.agent.transports:
+                self.config.agent.transports.append("onion")
+            log.info("Tor enabled — onion address: %s", onion)
+        except TorStartupError as exc:
+            log.error("Tor failed to start: %s", exc)
+            self._tor_manager = None
+            raise
+
+    async def _start_tor_ws(self) -> None:
+        """Start a second WebSocket connection routed through Tor SOCKS5."""
+        try:
+            from aiohttp_socks import ProxyConnector
+        except ImportError:
+            log.error(
+                "aiohttp-socks is required for onion transport. "
+                "Install it: pip install aiohttp-socks"
+            )
+            return
+
+        connector = ProxyConnector.from_url(self._tor_manager.socks_proxy_url())
+        self._tor_session = aiohttp.ClientSession(connector=connector)
+        self._tor_ws_task = asyncio.create_task(
+            self._run_gateway_ws(session=self._tor_session, transport="onion")
+        )
+
+    async def _run_gateway_ws(self, session: Optional[aiohttp.ClientSession] = None, transport: str = "fast"):
         backoff = 1.0
         while True:
-            if not self.session:
+            ws_session = session or self.session
+            if not ws_session:
                 await asyncio.sleep(1)
                 continue
 
@@ -661,10 +733,11 @@ class NodeAgent:
             url = self._gateway_ws_url()
             timestamp = self.identity.next_timestamp()
             headers = self.identity.sign_request(timestamp, "")
+            headers["X-Transport"] = transport
 
             try:
-                async with self.session.ws_connect(url, headers=headers, heartbeat=30) as ws:
-                    log.info("Connected to gateway websocket at %s", url)
+                async with ws_session.ws_connect(url, headers=headers, heartbeat=30) as ws:
+                    log.info("Connected to gateway websocket at %s (transport=%s)", url, transport)
                     backoff = 1.0
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
@@ -703,6 +776,7 @@ class NodeAgent:
         block_range = payload.get("block_range")
         max_tokens = self._coerce_int(payload.get("max_tokens"))
         temperature = self._coerce_float(payload.get("temperature"))
+        think = bool(payload.get("think", False))
 
         if not job_id or not model_id:
             await self._send_ws(
@@ -800,6 +874,7 @@ class NodeAgent:
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    think=think,
                 ):
                     token_count += 1
                     await self._send_ws(
@@ -904,6 +979,7 @@ class NodeAgent:
         messages: list,
         max_tokens: Optional[int],
         temperature: Optional[float],
+        think: bool = False,
     ) -> AsyncIterator[str]:
         """
         Run a single inference job via the persistent worker subprocess.
@@ -927,7 +1003,7 @@ class NodeAgent:
                     messages=messages,
                     max_new_tokens=max_new_tokens,
                     temperature=temp_value,
-                    think=False,
+                    think=think,
                 ):
                     loop.call_soon_threadsafe(queue.put_nowait, msg)
             except Exception as exc:
