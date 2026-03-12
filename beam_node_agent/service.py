@@ -88,7 +88,7 @@ def main():
 
             _emit({"type": "log", "job_id": job_id,
                    "message": f"Calling Ollama: model={OLLAMA_MODEL} "
-                              f"max_tokens={max_new_tokens} temp={temperature}"})
+                              f"max_tokens={max_new_tokens} temp={temperature} think={think}"})
 
             with urllib.request.urlopen(http_req, timeout=300) as resp:
                 for line in resp:
