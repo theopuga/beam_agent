@@ -63,9 +63,13 @@ We use collected information to:
 
 ## 4. Inference Data and Privacy
 
-### 4.1 Prompt Visibility
+### 4.1 Prompt Visibility and End-to-End Encryption
 
-**Important disclosure:** In the current version (v0) of the Beam network, inference prompts are processed by distributed nodes. Nodes that execute transformer blocks may have access to intermediate activations derived from your prompts. We do not guarantee prompt confidentiality against node operators.
+Beam supports **end-to-end encryption (E2E)** for inference data using X25519 key exchange and AES-256-GCM. When E2E is enabled, prompts and responses are encrypted between the client and the serving node — node operators cannot read your data.
+
+**Without E2E enabled:** Inference prompts are processed by distributed nodes. Nodes that execute transformer blocks may have access to intermediate activations derived from your prompts. We do not guarantee prompt confidentiality against node operators when E2E is not enabled.
+
+We recommend enabling E2E encryption for sensitive conversations.
 
 ### 4.2 Transport Modes
 

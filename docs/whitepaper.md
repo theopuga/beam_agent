@@ -97,15 +97,30 @@ Multi-GPU machines are supported. Ollama automatically utilizes all available GP
 
 ## 4. Privacy & Transport
 
-All traffic between users, the gateway, and nodes travels over standard HTTPS.
+Beam provides multiple active layers of privacy and encryption.
 
-Future versions may introduce additional transport options:
+### Transport Modes
 
-| Mode | Transport | Intended Use | Latency |
-|---|---|---|---|
-| Standard | HTTPS | Default usage | Lowest |
-| Secure | TLS + pinned certs | Privacy-aware users | Medium |
-| Onion | Tor (.onion) only | Censorship-resistant | Higher |
+| Mode | Transport | Intended Use | Latency | Status |
+|---|---|---|---|---|
+| Fast | HTTPS / TLS | Default usage | Lowest | **Active** |
+| Secure | TLS + pinned certs | Privacy-aware users | Medium | **Active** |
+| Onion | Tor (.onion) routing | Censorship-resistant | Higher | **Active** |
+
+### End-to-End Encryption (E2E)
+
+Beam supports **active end-to-end encryption** for all inference data:
+
+- **Key Exchange:** X25519 elliptic-curve Diffie-Hellman per session
+- **Symmetric Cipher:** AES-256-GCM for prompt and response encryption
+- **Key Derivation:** HKDF-SHA256
+- **Per-Session Keys:** Each inference session negotiates a fresh keypair
+
+With E2E enabled, node operators cannot read prompt content or model responses. Combined with onion routing, this provides both content confidentiality and network anonymity.
+
+### Onion Routing
+
+Onion transport is fully operational. Nodes that enable Tor expose a `.onion` hidden service, and user traffic is routed through the Tor network. This hides the user's IP address and network identity from both node operators and the control plane.
 
 ---
 
@@ -192,14 +207,14 @@ reward = base_rate * uptime_factor * reliability_factor
 | Threat | Mitigation |
 |---|---|
 | Malicious nodes returning bad outputs | Canary checks, redundant routing, reward decay, bans |
-| Prompt logging by nodes | Clear disclosure; future: encrypted inference |
+| Prompt logging by nodes | E2E encryption (X25519 + AES-256-GCM) — nodes cannot read encrypted prompts |
 | Sybil attacks | Hardware benchmarks, VRAM thresholds, admission controls |
 | Gateway API abuse | Rate limiting, token pricing, anomaly detection |
 
 ### Explicit Non-Guarantees
 
 The system does **not** guarantee:
-- Prompt confidentiality
+- Prompt confidentiality without E2E encryption enabled (with E2E enabled, prompts are encrypted end-to-end)
 - Output correctness
 - Resistance to state-level adversaries
 - Trustless inference
@@ -238,7 +253,7 @@ A node is reward-eligible when:
 | M3 | Additional MoE models (Kimi K2.5, GLM-5) |
 | M4 | Off-chain token ledger |
 | M5 | On-chain settlement (optional) |
-| M6 | Transport privacy options (secure, onion) |
+| M6 | ~~Transport privacy options (secure, onion)~~ — **Completed**: onion routing and E2E encryption active |
 
 ---
 

@@ -73,6 +73,11 @@ agent:
 | `BEAM_GPU_NAME` | Override GPU name detection | Auto-detect |
 | `BEAM_GPU_VRAM_GB` | Override GPU VRAM detection (in GB) | Auto-detect |
 | `BEAM_GPU_COUNT` | Override GPU count detection | Auto-detect |
+| `BEAM_TOR_ENABLED` | Enable Tor onion routing | `true` |
+| `BEAM_TOR_SOCKS_PORT` | Tor SOCKS5 proxy port | `9050` |
+| `BEAM_TOR_DATA_DIR` | Tor state data directory | `tor_data` |
+| `BEAM_TOR_BINARY` | Custom Tor binary path | `tor` |
+| `BEAM_E2E_ENCRYPTION` | Enable E2E encryption (`true` or `1`) | `false` |
 
 ---
 

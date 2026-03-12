@@ -42,6 +42,14 @@ agent:
     max_concurrent_jobs: 1
     max_model_class: "B"
     preferred_model_id: null  # null = accept any assigned model
+  tor:
+    enabled: true
+    socks_port: 9050
+    data_dir: "tor_data"
+    binary: "tor"
+    bootstrap_timeout: 60
+  e2e_encryption:
+    enabled: false             # Set true to enable E2E encryption
 ```
 
 ---
@@ -80,3 +88,19 @@ agent:
 | `max_concurrent_jobs` | int | `1` | Maximum inference jobs this node handles simultaneously |
 | `max_model_class` | string | `"B"` | Model class: `A` (MiMo-7B-RL), `B` (Qwen 3.5 35B-A3B), `C` (upcoming) |
 | `preferred_model_id` | string | `null` | Preferred model identifier. `null` = accept any assigned model |
+
+### tor
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `true` | Enable Tor onion routing support |
+| `socks_port` | int | `9050` | Tor SOCKS5 proxy port |
+| `data_dir` | string | `"tor_data"` | Directory for Tor state data |
+| `binary` | string | `"tor"` | Path to the Tor binary |
+| `bootstrap_timeout` | int | `60` | Seconds to wait for Tor to bootstrap |
+
+### e2e_encryption
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | bool | `false` | Enable end-to-end encryption (X25519 key exchange + AES-256-GCM) for inference data |

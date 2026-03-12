@@ -58,6 +58,24 @@ Coming soon: Kimi K2.5, GLM-5 (reserved, not yet available).
 
 ---
 
+## Security & Encryption
+
+| Feature | Status | Details |
+|---|---|---|
+| **Onion Routing** | Active | Full Tor `.onion` routing for network anonymity. Installed by default. |
+| **E2E Encryption** | Active | X25519 key exchange + AES-256-GCM. Encrypts prompts and responses end-to-end. |
+| **Transport Modes** | Active | `fast` (TLS), `secure` (pinned certs), `onion` (Tor) |
+
+Enable E2E encryption via `BEAM_E2E_ENCRYPTION=true` or in `config.yaml`:
+
+```yaml
+agent:
+  e2e_encryption:
+    enabled: true
+```
+
+---
+
 ## Configuration
 
 The agent reads its settings from `config.yaml`, which the installer creates for you. Key options include the control-plane URL, Ollama endpoint, and pairing ports.
