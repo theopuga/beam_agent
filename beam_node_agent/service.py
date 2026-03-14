@@ -398,20 +398,33 @@ class NodeAgent:
         try:
             # 1. Registration / Linking Phase
             if self.identity.node_id:
-                if self.config.agent.pairing_token:
-                    linked, message, status = await self._link_node_with_token(
-                        self.config.agent.pairing_token
+                # Validate existing identity is still recognised by the
+                # control plane.  If the node was deleted/unlinked while
+                # we were offline, clear the stale identity and fall
+                # through to fresh registration.
+                if not await self._validate_identity():
+                    log.warning(
+                        "Existing identity %s is no longer valid — "
+                        "clearing and re-registering.",
+                        self.identity.node_id,
                     )
-                    if linked:
-                        log.info("Linked node to renter: %s", message)
-                    else:
-                        log.warning(
-                            "Failed to link node with pairing token (%s): %s",
-                            status,
-                            message,
+                    self.identity.clear_state()
+                else:
+                    if self.config.agent.pairing_token:
+                        linked, message, status = await self._link_node_with_token(
+                            self.config.agent.pairing_token
                         )
-                log.info(f"Using existing identity: {self.identity.node_id}")
-            else:
+                        if linked:
+                            log.info("Linked node to renter: %s", message)
+                        else:
+                            log.warning(
+                                "Failed to link node with pairing token (%s): %s",
+                                status,
+                                message,
+                            )
+                    log.info(f"Using existing identity: {self.identity.node_id}")
+
+            if not self.identity.node_id:
                 if self.config.agent.pairing_token or not self._awaiting_remote_pairing:
                     await self._register()
                 else:
@@ -1155,6 +1168,34 @@ class NodeAgent:
         except (TypeError, ValueError):
             return None
 
+    async def _validate_identity(self) -> bool:
+        """Check if the persisted node_id is still recognised by the CP.
+
+        Sends a lightweight assignment-fetch request. If the server responds
+        with 403/404/410 the identity is stale (node deleted or unlinked).
+        Returns True if the identity is still valid.
+        """
+        if not self.identity.node_id:
+            return False
+
+        url = (
+            f"{self.config.control_plane.url}"
+            f"/api/v1/nodes/{self.identity.node_id}/assignment"
+        )
+        timestamp = self.identity.next_timestamp()
+        headers = self.identity.sign_request(timestamp, "")
+
+        try:
+            async with self.session.get(url, headers=headers) as resp:
+                if resp.status in (401, 403, 404, 410):
+                    return False
+                return True
+        except Exception as e:
+            log.warning("Identity validation request failed: %s", e)
+            # Network error — assume identity is still valid, will fail in
+            # heartbeat loop if it's truly gone.
+            return True
+
     async def _loop(self):
         while True:
             start_time = time.time()
@@ -1297,11 +1338,20 @@ class NodeAgent:
             async with self.session.post(url, data=body_json, headers=headers) as resp:
                 if resp.status == 200:
                     log.debug("Heartbeat OK")
-                elif resp.status in (401, 403):
-                    # Auth failed - maybe node deleted?
-                    log.error("Heartbeat auth failed. Identity might be invalid.")
+                elif resp.status in (401, 403, 410):
+                    # Node was deleted/unlinked or identity is invalid.
+                    # Clear persisted state so next restart begins fresh.
+                    log.error(
+                        "Heartbeat rejected (%s). Node was removed or identity "
+                        "is invalid — clearing identity and stopping.",
+                        resp.status,
+                    )
+                    self.identity.clear_state()
+                    raise asyncio.CancelledError()
                 else:
                     log.warning(f"Heartbeat failed: {resp.status}")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             log.error(f"Heartbeat connection error: {e}")
 
