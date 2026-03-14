@@ -11,14 +11,18 @@ from typing import Any, Dict, Optional
 import aiohttp
 
 from .config import CONTROL_PLANE_URL, HEARTBEAT_INTERVAL_SEC
+from .node_identity import NodeIdentity
 from .petals_wrapper import PetalsWrapper
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("BeamNodeAgent")
 
+STATE_FILE = "node_state.json"
+
 
 class BeamNodeAgent:
     def __init__(self):
+        self.identity = NodeIdentity(STATE_FILE)
         self.node_id: Optional[str] = None
         self.node_secret: Optional[str] = None
         self.petals = PetalsWrapper(port=31337)
@@ -46,10 +50,8 @@ class BeamNodeAgent:
     async def _register(self):
         log.info(f"Registering with Control Plane at {CONTROL_PLANE_URL}...")
 
-        fingerprint = hashlib.sha256(platform.node().encode()).hexdigest()
-
         payload = {
-            "machine_fingerprint": fingerprint,
+            "machine_fingerprint": self.identity.machine_fingerprint,
             "gpu": {
                 "name": "Generic GPU",  # Placeholder, would use pynvml
                 "vram_gb": 24.0,
@@ -59,6 +61,13 @@ class BeamNodeAgent:
             "transports": ["http"],
             "capabilities": {},
         }
+
+        # If we have a persisted identity, send it so the server can
+        # reconnect us to the same node entity instead of creating a new one.
+        if self.identity.node_id and self.identity.node_secret:
+            payload["node_id"] = self.identity.node_id
+            payload["node_secret"] = self.identity.node_secret
+            log.info(f"Attempting reconnection as node {self.identity.node_id}")
 
         try:
             async with self.session.post(
@@ -72,7 +81,14 @@ class BeamNodeAgent:
                 data = await resp.json()
                 self.node_id = data["node_id"]
                 self.node_secret = data["node_secret"]
-                log.info(f"Registered successfully. Node ID: {self.node_id}")
+
+                # Persist identity for future reconnections
+                self.identity.save_state(self.node_id, self.node_secret)
+
+                if self.node_id == (payload.get("node_id") or ""):
+                    log.info(f"Reconnected successfully. Node ID: {self.node_id}")
+                else:
+                    log.info(f"Registered as new node. Node ID: {self.node_id}")
 
                 # Handle initial assignment
                 if "assignment" in data:
